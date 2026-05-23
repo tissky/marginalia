@@ -154,4 +154,12 @@ real-world data. Known gaps:
 
 ## License
 
-(insert license file here)
+Copyright (c) 2026 shenmintao
+
+Marginalia is licensed under the GNU Affero General Public License v3.0
+or later (AGPL-3.0-or-later). See [LICENSE](LICENSE) for the full text.
+
+If you run a modified version of Marginalia as a network service, the
+AGPL requires you to make the corresponding source available to your
+users.
+

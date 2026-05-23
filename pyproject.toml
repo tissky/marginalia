@@ -3,6 +3,18 @@ name = "marginalia"
 version = "0.1.0"
 description = "A library-science-inspired personal knowledge management system with LLM agents."
 requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+    { name = "shenmintao" },
+]
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
