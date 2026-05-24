@@ -25,7 +25,8 @@ from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import AuditEvent, File, FileEntry, Folder
+from marginalia.db.models import File, FileEntry, Folder
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.services.upload import (
     DEFAULT_ON_CONFLICT,
     DisplayNameConflictError,
@@ -34,30 +35,24 @@ from marginalia.services.upload import (
 )
 from marginalia.storage import MirrorStorage, get_storage
 
-
 _USER_LIFECYCLE_TARGETS = {
     "active", "manual_active", "manual_archived",
 }
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 class EntryNotFoundError(Exception):
     pass
 
-
 class InvalidLifecycleTransitionError(Exception):
     pass
-
 
 async def _get_live_entry(db: AsyncSession, entry_id: str) -> FileEntry:
     e = await db.get(FileEntry, entry_id)
     if e is None or e.deleted_at is not None:
         raise EntryNotFoundError(entry_id)
     return e
-
 
 async def _mirror_sync_disk_path(
     db: AsyncSession, entry: FileEntry, *, reason: str,
@@ -85,7 +80,6 @@ async def _mirror_sync_disk_path(
         file_row.storage_key = new_key
         file_row.updated_at = _utcnow()
 
-
 async def _build_folder_display_path(
     db: AsyncSession, folder_id: str | None,
 ) -> str:
@@ -107,7 +101,6 @@ async def _build_folder_display_path(
         parts.append(f.name)
         cur_id = f.parent_id
     return "/" + "/".join(reversed(parts)) if parts else ""
-
 
 async def rename_entry(
     db: AsyncSession,
@@ -149,7 +142,7 @@ async def rename_entry(
     entry.display_name = final
     entry.updated_at = _utcnow()
     await _mirror_sync_disk_path(db, entry, reason="rename")
-    await AuditEvent.append(db, kind="entry_renamed", payload={
+    await audit_events_repo.append(db, kind="entry_renamed", payload={
         "entry_id": entry.id,
         "folder_id": entry.folder_id,
         "old_name": old_name,
@@ -157,7 +150,6 @@ async def rename_entry(
         "auto_renamed": auto_renamed,
     })
     return entry
-
 
 async def move_entry(
     db: AsyncSession,
@@ -202,7 +194,7 @@ async def move_entry(
     entry.display_name = final
     entry.updated_at = _utcnow()
     await _mirror_sync_disk_path(db, entry, reason="move")
-    await AuditEvent.append(db, kind="entry_moved", payload={
+    await audit_events_repo.append(db, kind="entry_moved", payload={
         "entry_id": entry.id,
         "old_folder_id": old_folder,
         "new_folder_id": new_folder_id,
@@ -210,7 +202,6 @@ async def move_entry(
         "auto_renamed": auto_renamed,
     })
     return entry
-
 
 async def change_lifecycle(
     db: AsyncSession,
@@ -229,14 +220,13 @@ async def change_lifecycle(
     old = entry.lifecycle
     entry.lifecycle = new_lifecycle
     entry.updated_at = _utcnow()
-    await AuditEvent.append(db, kind="lifecycle_changed", payload={
+    await audit_events_repo.append(db, kind="lifecycle_changed", payload={
         "entry_id": entry.id,
         "old": old,
         "new": new_lifecycle,
         "trigger": "user",
     })
     return entry
-
 
 async def soft_delete_entry(
     db: AsyncSession,
@@ -249,7 +239,7 @@ async def soft_delete_entry(
     entry.deleted_at = now
     entry.purge_after = now + timedelta(seconds=max(0, purge_after_seconds))
     entry.updated_at = now
-    await AuditEvent.append(db, kind="entry_soft_deleted", payload={
+    await audit_events_repo.append(db, kind="entry_soft_deleted", payload={
         "entry_id": entry.id,
         "folder_id": entry.folder_id,
         "display_name": entry.display_name,

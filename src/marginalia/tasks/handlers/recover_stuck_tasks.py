@@ -21,7 +21,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from marginalia.db.models import AuditEvent
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import tasks as tasks_repo
 from marginalia.tasks.kinds import KIND_RECOVER_STUCK_TASKS, task_handler
@@ -30,10 +30,8 @@ log = logging.getLogger(__name__)
 
 GRACE_SECONDS = 10  # treat anything past lease+grace as definitively dead
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 @task_handler(KIND_RECOVER_STUCK_TASKS)
 async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
@@ -55,7 +53,7 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
                     now=now,
                     error="recover_stuck_tasks: lease expired beyond max_attempts",
                 )
-                await AuditEvent.append(
+                await audit_events_repo.append(
                     session,
                     kind="task_marked_dead",
                     task_id=t.id,
@@ -75,7 +73,7 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
                 await tasks_repo.revive_running_to_pending(
                     session, task_id=t.id, now=now,
                 )
-                await AuditEvent.append(
+                await audit_events_repo.append(
                     session,
                     kind="task_recovered",
                     task_id=t.id,

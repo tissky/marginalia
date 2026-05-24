@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from marginalia.db.models import (
-    AuditEvent,
     Catalog,
     EntryTag,
     File,
@@ -34,6 +33,7 @@ from marginalia.db.models import (
     Folder,
     Tag,
 )
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.pipelines import resolve_pipeline
 from marginalia.pipelines.base import PipelineContext, PipelineResult, TagSuggestion
@@ -76,7 +76,7 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
         now = _utcnow()
         file_row.ingest_status = "processing"
         file_row.updated_at = now
-        await AuditEvent.append(
+        await audit_events_repo.append(
             session,
             kind="ingest_status_changed",
             payload={"file_id": file_id, "status": "processing"},
@@ -95,7 +95,7 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
         entry = await entries_repo.find_first_live_for_file(session, file_id)
         if entry is None:
             log.warning("file %s has no live entry; aborting ingest", file_id)
-            await AuditEvent.append(
+            await audit_events_repo.append(
                 session,
                 kind="ingest_status_changed",
                 payload={"file_id": file_id, "status": "failed", "reason": "no_live_entry"},
@@ -150,7 +150,7 @@ async def _mark_failed(file_id: str, *, reason: str) -> None:
         if file_row is not None:
             file_row.ingest_status = "failed"
             file_row.updated_at = _utcnow()
-        await AuditEvent.append(
+        await audit_events_repo.append(
             session,
             kind="ingest_status_changed",
             payload={"file_id": file_id, "status": "failed", "reason": reason},
@@ -258,7 +258,7 @@ async def _persist(
                 created_at=now,
             ))
 
-    await AuditEvent.append(
+    await audit_events_repo.append(
         session,
         kind="ingest_status_changed",
         payload={
@@ -295,7 +295,7 @@ async def _resolve_or_create_catalog_path(session, path: list[str]) -> str | Non
             )
             session.add(existing)
             await session.flush()
-            await AuditEvent.append(
+            await audit_events_repo.append(
                 session,
                 kind="catalog_created",
                 payload={"catalog_id": existing.id, "name": name, "parent_id": parent_id},
@@ -327,7 +327,7 @@ async def _resolve_or_create_tag(session, sugg: TagSuggestion, now: datetime) ->
     )
     session.add(tag)
     await session.flush()
-    await AuditEvent.append(
+    await audit_events_repo.append(
         session,
         kind="tag_created",
         payload={"tag_id": tag.id, "name": sugg.name, "facet": sugg.facet, "source": "ingest"},

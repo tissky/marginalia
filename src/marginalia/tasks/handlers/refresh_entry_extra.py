@@ -25,7 +25,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from marginalia.db.models import AuditEvent
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage,
@@ -50,7 +50,6 @@ MIN_JOURNALS = 3
 CAP = 20
 SOURCE_KIND = "refresh_entry_extra"
 
-
 REFRESH_SYSTEM = """You are Marginalia's per-entry insight synthesizer.
 
 You receive ONE file_entry's metadata plus the journal notes (the
@@ -68,7 +67,6 @@ Rules:
 - Output ONE JSON object with field `extra` (string) only.
 """
 
-
 REFRESH_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -78,16 +76,13 @@ REFRESH_SCHEMA: dict[str, Any] = {
     },
 }
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def _hash(text: str | None) -> str:
     if text is None:
         return ""
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
-
 
 @task_handler(KIND_REFRESH_ENTRY_EXTRA)
 async def handle_refresh_entry_extra(payload: Mapping[str, Any]) -> None:
@@ -145,7 +140,6 @@ async def handle_refresh_entry_extra(payload: Mapping[str, Any]) -> None:
 
     log.info("refresh_entry_extra: candidates=%d applied=%d noop=%d",
              len(candidates), applied, noop_count)
-
 
 async def _build_candidates(
     *,
@@ -213,7 +207,6 @@ async def _build_candidates(
         await session.commit()
     return candidates
 
-
 async def _process_one(
     cand: dict[str, Any],
     *,
@@ -279,7 +272,7 @@ async def _process_one(
         await entries_repo.update_extra(
             session, entry_id=cand["entry_id"], extra=new_extra, now=_utcnow(),
         )
-        await AuditEvent.append(
+        await audit_events_repo.append(
             session,
             kind="entry_extra_refreshed",
             payload={
@@ -304,7 +297,6 @@ async def _process_one(
         )
         await session.commit()
     return "applied"
-
 
 async def _ask_llm(cand: dict[str, Any]) -> str | None:
     user_payload = {

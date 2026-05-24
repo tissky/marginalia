@@ -23,7 +23,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import AuditEvent, Task
+from marginalia.db.models import Task
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import get_session
 from marginalia.repositories import task_outcomes as task_outcomes_repo
 from marginalia.repositories import tasks as tasks_repo
@@ -59,7 +60,6 @@ TEND_CHAIN: tuple[str, ...] = (
 
 TEND_OBJECT_KIND = "tend_run"
 TEND_DISPATCH_KIND = "tend_dispatch"
-
 
 @router.post("/tend", status_code=202)
 async def post_tend(
@@ -97,7 +97,7 @@ async def post_tend(
             "skipped": False,
             "status": task.status,
         })
-        await AuditEvent.append(
+        await audit_events_repo.append(
             db,
             kind="task_enqueued",
             task_id=task.id,
@@ -119,7 +119,6 @@ async def post_tend(
         "tend_run_id": run_id,
         "tasks": dispatched,
     }
-
 
 @router.get("/tend/{run_id}")
 async def get_tend(

@@ -22,7 +22,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from marginalia.db.models import AuditEvent
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import journal as journal_repo
 from marginalia.repositories import task_outcomes as task_outcomes_repo
@@ -47,10 +47,8 @@ SUMMARIZE_MIN_TURNS = 3
 SUMMARIZE_MIN_AGE = timedelta(hours=24)
 SUMMARIZE_MAX_DISPATCH_PER_TICK = 10
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def _aware(dt: datetime | None) -> datetime | None:
     """SQLite returns naive datetimes; coerce to UTC-aware for arithmetic."""
@@ -59,7 +57,6 @@ def _aware(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
-
 
 @task_handler(KIND_PERIODIC_TICK)
 async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
@@ -91,7 +88,7 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
             )
             if task is not None:
                 dispatched.append(kind)
-                await AuditEvent.append(
+                await audit_events_repo.append(
                     session,
                     kind="task_enqueued",
                     task_id=task.id,
@@ -129,7 +126,6 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
             },
         )
         await session.commit()
-
 
 async def _dispatch_summarize_sessions(session, now: datetime) -> list[str]:
     """Find sessions that have accumulated enough reflect_turn rows and
@@ -177,7 +173,7 @@ async def _dispatch_summarize_sessions(session, now: datetime) -> list[str]:
         )
         if task is not None:
             enqueued.append(sid)
-            await AuditEvent.append(
+            await audit_events_repo.append(
                 session,
                 kind="task_enqueued",
                 task_id=task.id,
@@ -188,7 +184,6 @@ async def _dispatch_summarize_sessions(session, now: datetime) -> list[str]:
                 },
             )
     return enqueued
-
 
 async def bootstrap_periodic_tick() -> None:
     """Ensure exactly one periodic_tick row exists at runner startup.

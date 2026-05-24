@@ -36,9 +36,9 @@ from itertools import combinations
 from typing import Any, Mapping
 
 from marginalia.db.models import (
-    AuditEvent,
     View,
 )
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage, ChatRequest, TextBlock, get_chat_client,
@@ -268,7 +268,7 @@ async def _persist_view(
     )
     session.add(view)
     await session.flush()
-    await AuditEvent.append(
+    await audit_events_repo.append(
         session,
         kind="view_created",
         payload={

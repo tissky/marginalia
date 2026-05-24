@@ -13,6 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from marginalia.db.models.tasks import Task
 
 
+def _release_values(**extras: object) -> dict[str, object]:
+    """UPDATE values for any transition that releases the worker lock.
+    All five lifecycle terminals (done/dead/pending-retry/pending-revive/
+    dead-from-running) share this base; extras specify the new status,
+    timestamps, error text, etc."""
+    return {"locked_by": None, "lease_expires_at": None, **extras}
+
+
 async def find_pending_or_running_by_dedup(
     db: AsyncSession, dedup_key: str,
 ) -> Task | None:
@@ -32,18 +40,18 @@ async def claim_pending_ids(
     *,
     now: datetime,
     limit: int,
-    use_skip_locked: bool,
 ) -> list[str]:
     """Pick the next pending task ids, ordered by `(priority, scheduled_at)`.
-    The caller turns these into `running`. On postgres pass
-    `use_skip_locked=True`; SQLite has no FOR UPDATE."""
+    The caller turns these into `running`. Postgres uses FOR UPDATE SKIP
+    LOCKED so concurrent workers don't step on each other; SQLite has no
+    FOR UPDATE so the caller is expected to be the only worker."""
     stmt = (
         select(Task.id)
         .where(Task.status == "pending", Task.scheduled_at <= now)
         .order_by(Task.priority.asc(), Task.scheduled_at.asc())
         .limit(limit)
     )
-    if use_skip_locked:
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
     rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
@@ -79,13 +87,9 @@ async def mark_done(
     await db.execute(
         update(Task)
         .where(Task.id == task_id)
-        .values(
-            status="done",
-            finished_at=now,
-            last_error=None,
-            lease_expires_at=None,
-            locked_by=None,
-        )
+        .values(_release_values(
+            status="done", finished_at=now, last_error=None,
+        ))
     )
 
 
@@ -95,13 +99,9 @@ async def mark_dead(
     await db.execute(
         update(Task)
         .where(Task.id == task_id)
-        .values(
-            status="dead",
-            last_error=error,
-            finished_at=now,
-            lease_expires_at=None,
-            locked_by=None,
-        )
+        .values(_release_values(
+            status="dead", finished_at=now, last_error=error,
+        ))
     )
 
 
@@ -115,13 +115,9 @@ async def reschedule_for_retry(
     await db.execute(
         update(Task)
         .where(Task.id == task_id)
-        .values(
-            status="pending",
-            last_error=error,
-            scheduled_at=next_run_at,
-            lease_expires_at=None,
-            locked_by=None,
-        )
+        .values(_release_values(
+            status="pending", last_error=error, scheduled_at=next_run_at,
+        ))
     )
 
 
@@ -179,12 +175,7 @@ async def revive_running_to_pending(
     await db.execute(
         update(Task)
         .where(Task.id == task_id, Task.status == "running")
-        .values(
-            status="pending",
-            locked_by=None,
-            lease_expires_at=None,
-            scheduled_at=now,
-        )
+        .values(_release_values(status="pending", scheduled_at=now))
     )
 
 
@@ -196,13 +187,9 @@ async def mark_running_dead(
     await db.execute(
         update(Task)
         .where(Task.id == task_id, Task.status == "running")
-        .values(
-            status="dead",
-            last_error=error,
-            finished_at=now,
-            locked_by=None,
-            lease_expires_at=None,
-        )
+        .values(_release_values(
+            status="dead", finished_at=now, last_error=error,
+        ))
     )
 
 

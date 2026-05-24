@@ -22,12 +22,12 @@ from typing import Any, Literal, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import AuditEvent, EntryRelation
+from marginalia.db.models import EntryRelation
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import entry_relations as relations_repo
 from marginalia.utils.ids import new_id
 
 UpsertAction = Literal["incremented", "created"]
-
 
 async def upsert_relation_pair(
     session: AsyncSession,
@@ -84,5 +84,5 @@ async def upsert_relation_pair(
     }
     if audit_extra:
         payload.update(audit_extra)
-    await AuditEvent.append(session, kind="relation_mined", payload=payload)
+    await audit_events_repo.append(session, kind="relation_mined", payload=payload)
     return rid, action

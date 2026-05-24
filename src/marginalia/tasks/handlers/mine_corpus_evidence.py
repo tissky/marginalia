@@ -35,9 +35,9 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from marginalia.db.models import (
-    AuditEvent,
     EntryRelation,
 )
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage,
@@ -181,7 +181,7 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
                     created_at=_utcnow(),
                 ))
                 accepted += 1
-                await AuditEvent.append(
+                await audit_events_repo.append(
                     session, kind="relation_mined",
                     payload={
                         "relation_id": rel_id,

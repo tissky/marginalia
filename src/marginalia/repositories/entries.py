@@ -15,10 +15,43 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from marginalia.db.models import EntryTag, File, FileEntry, TaskOutcome
 
 
+ACTIVE_LIFECYCLES = ("active", "manual_active")
+
+
 def _folder_clause(folder_id: str | None):
     if folder_id is None:
         return FileEntry.folder_id.is_(None)
     return FileEntry.folder_id == folder_id
+
+
+def _live_entry():
+    """`FileEntry.deleted_at IS NULL` — 'entry has not been soft-deleted'."""
+    return FileEntry.deleted_at.is_(None)
+
+
+def _live_file():
+    """`File.deleted_at IS NULL` — 'file row has not been soft-deleted'."""
+    return File.deleted_at.is_(None)
+
+
+def _apply_tag_filters(
+    stmt,
+    *,
+    tags_all: list[str] | None = None,
+    tags_any: list[str] | None = None,
+    tags_none: list[str] | None = None,
+):
+    """Glue tag-filter subqueries onto a select() over FileEntry."""
+    for tid in tags_all or ():
+        sub = select(EntryTag.entry_id).where(EntryTag.tag_id == tid)
+        stmt = stmt.where(FileEntry.id.in_(sub))
+    if tags_any:
+        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_any))
+        stmt = stmt.where(FileEntry.id.in_(sub))
+    if tags_none:
+        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_none))
+        stmt = stmt.where(not_(FileEntry.id.in_(sub)))
+    return stmt
 
 
 async def list_live_with_file_in_folder(
@@ -33,7 +66,7 @@ async def list_live_with_file_in_folder(
             .join(File, File.id == FileEntry.file_id)
             .where(
                 FileEntry.folder_id == folder_id,
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
             )
             .order_by(FileEntry.display_name)
             .limit(limit)
@@ -52,7 +85,7 @@ async def list_live_in_folder(
             select(FileEntry)
             .where(
                 FileEntry.folder_id == folder_id,
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
             )
             .order_by(FileEntry.display_name)
         )
@@ -70,7 +103,7 @@ async def find_live_by_folder_and_name(
             select(FileEntry).where(
                 _folder_clause(folder_id),
                 FileEntry.display_name == name,
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
             )
         )
     ).scalar_one_or_none()
@@ -84,7 +117,7 @@ async def find_seed_by_file_id(
     return (
         await db.execute(
             select(FileEntry)
-            .where(FileEntry.file_id == file_id, FileEntry.deleted_at.is_(None))
+            .where(FileEntry.file_id == file_id, _live_entry())
             .order_by(FileEntry.created_at)
             .limit(1)
         )
@@ -101,8 +134,8 @@ async def search_with_file(
             select(FileEntry, File)
             .join(File, File.id == FileEntry.file_id)
             .where(
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
+                _live_entry(),
+                _live_file(),
                 or_(
                     FileEntry.display_name.ilike(like),
                     File.summary.ilike(like),
@@ -126,8 +159,8 @@ async def get_live_with_file(
             .join(File, File.id == FileEntry.file_id)
             .where(
                 FileEntry.id == entry_id,
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
+                _live_entry(),
+                _live_file(),
             )
         )
     ).first()
@@ -143,8 +176,8 @@ async def list_live_with_file(db: AsyncSession) -> list[tuple[FileEntry, File]]:
             select(FileEntry, File)
             .join(File, FileEntry.file_id == File.id)
             .where(
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
+                _live_entry(),
+                _live_file(),
             )
         )
     ).all()
@@ -165,8 +198,8 @@ async def list_live_with_file_in_folders(
             .join(File, File.id == FileEntry.file_id)
             .where(
                 FileEntry.folder_id.in_(folder_ids),
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
+                _live_entry(),
+                _live_file(),
             )
             .order_by(FileEntry.folder_id, FileEntry.display_name)
         )
@@ -195,8 +228,8 @@ async def search_filtered(
         select(FileEntry, File)
         .join(File, File.id == FileEntry.file_id)
         .where(
-            FileEntry.deleted_at.is_(None),
-            File.deleted_at.is_(None),
+            _live_entry(),
+            _live_file(),
         )
     )
     if lifecycle:
@@ -217,15 +250,9 @@ async def search_filtered(
         if not catalog_in:
             return []
         stmt = stmt.where(FileEntry.catalog_id.in_(catalog_in))
-    for tid in tags_all or ():
-        sub = select(EntryTag.entry_id).where(EntryTag.tag_id == tid)
-        stmt = stmt.where(FileEntry.id.in_(sub))
-    if tags_any:
-        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_any))
-        stmt = stmt.where(FileEntry.id.in_(sub))
-    if tags_none:
-        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_none))
-        stmt = stmt.where(not_(FileEntry.id.in_(sub)))
+    stmt = _apply_tag_filters(
+        stmt, tags_all=tags_all, tags_any=tags_any, tags_none=tags_none,
+    )
     if extra_entry_ids is not None:
         if not extra_entry_ids:
             return []
@@ -249,7 +276,7 @@ async def list_ids_under_filter_spec(
     repo doesn't import the catalogs repo (and breaks no layering)."""
     stmt = (
         select(FileEntry.id)
-        .where(FileEntry.deleted_at.is_(None))
+        .where(_live_entry())
         .where(FileEntry.lifecycle.in_(spec.get("lifecycle") or default_lifecycle))
     )
     sub = spec.get("catalog_subtree") or []
@@ -260,15 +287,12 @@ async def list_ids_under_filter_spec(
         if not ids:
             return []
         stmt = stmt.where(FileEntry.catalog_id.in_(ids))
-    for tid in spec.get("tags_all") or []:
-        s = select(EntryTag.entry_id).where(EntryTag.tag_id == tid)
-        stmt = stmt.where(FileEntry.id.in_(s))
-    if spec.get("tags_any"):
-        s = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(spec["tags_any"]))
-        stmt = stmt.where(FileEntry.id.in_(s))
-    if spec.get("tags_none"):
-        s = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(spec["tags_none"]))
-        stmt = stmt.where(not_(FileEntry.id.in_(s)))
+    stmt = _apply_tag_filters(
+        stmt,
+        tags_all=spec.get("tags_all"),
+        tags_any=spec.get("tags_any"),
+        tags_none=spec.get("tags_none"),
+    )
     return list((await db.execute(stmt)).scalars().all())
 
 
@@ -317,8 +341,8 @@ async def list_live_with_file_by_ids(
             .join(File, File.id == FileEntry.file_id)
             .where(
                 FileEntry.id.in_(entry_ids),
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
+                _live_entry(),
+                _live_file(),
             )
         )
     ).all()
@@ -335,7 +359,7 @@ async def filter_live_ids(
         await db.execute(
             select(FileEntry.id).where(
                 FileEntry.id.in_(candidate_ids),
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
             )
         )
     ).scalars().all()
@@ -374,7 +398,7 @@ async def has_live_entry_for_file(
         await db.execute(
             select(FileEntry.id).where(
                 FileEntry.file_id == file_id,
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
             ).limit(1)
         )
     ).scalar_one_or_none()
@@ -419,9 +443,9 @@ async def list_live_active_with_file(
             select(FileEntry, File)
             .join(File, File.id == FileEntry.file_id)
             .where(
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-                FileEntry.lifecycle.in_(("active", "manual_active")),
+                _live_entry(),
+                _live_file(),
+                FileEntry.lifecycle.in_(ACTIVE_LIFECYCLES),
             )
         )
     ).all()
@@ -442,8 +466,8 @@ async def list_active_with_file_by_ids(
             .join(File, File.id == FileEntry.file_id)
             .where(
                 FileEntry.id.in_(entry_ids),
-                FileEntry.deleted_at.is_(None),
-                FileEntry.lifecycle.in_(("active", "manual_active")),
+                _live_entry(),
+                FileEntry.lifecycle.in_(ACTIVE_LIFECYCLES),
             )
         )
     ).all()
@@ -459,8 +483,8 @@ async def list_active_recent_updated(
         await db.execute(
             select(FileEntry)
             .where(
-                FileEntry.lifecycle.in_(("active", "manual_active")),
-                FileEntry.deleted_at.is_(None),
+                FileEntry.lifecycle.in_(ACTIVE_LIFECYCLES),
+                _live_entry(),
             )
             .order_by(FileEntry.updated_at.desc())
             .limit(limit)
@@ -489,10 +513,10 @@ async def list_active_with_file_eligible_for_enrich(
             select(FileEntry, File)
             .join(File, File.id == FileEntry.file_id)
             .where(
-                FileEntry.lifecycle.in_(("active", "manual_active")),
-                FileEntry.deleted_at.is_(None),
+                FileEntry.lifecycle.in_(ACTIVE_LIFECYCLES),
+                _live_entry(),
                 File.ingest_status == "done",
-                File.deleted_at.is_(None),
+                _live_file(),
                 not_(FileEntry.id.in_(select(recently.c.object_id))),
             )
             .order_by(FileEntry.created_at.asc())
@@ -512,7 +536,7 @@ async def list_active_for_demotion(
             select(FileEntry.id, FileEntry.created_at)
             .where(
                 FileEntry.lifecycle == "active",
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
                 FileEntry.created_at <= cutoff_age,
             )
             .order_by(FileEntry.created_at.asc())
@@ -532,7 +556,7 @@ async def list_demoted_for_archive(
             select(FileEntry.id, FileEntry.updated_at)
             .where(
                 FileEntry.lifecycle == "demoted",
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
                 FileEntry.updated_at <= cutoff_demoted,
             )
             .order_by(FileEntry.updated_at.asc())
@@ -557,7 +581,7 @@ async def transition_lifecycle(
         .where(
             FileEntry.id == entry_id,
             FileEntry.lifecycle == from_lifecycle,
-            FileEntry.deleted_at.is_(None),
+            _live_entry(),
         )
         .values(lifecycle=to_lifecycle, updated_at=now)
     )
@@ -580,17 +604,13 @@ async def list_sibling_display_names(
 ) -> list[str]:
     """Display names of every other live entry in the same folder, ordered
     by name. Used by ingest_file's pipeline-context builder."""
-    if folder_id is None:
-        clause = FileEntry.folder_id.is_(None)
-    else:
-        clause = FileEntry.folder_id == folder_id
     rows = (
         await db.execute(
             select(FileEntry.display_name)
             .where(
-                clause,
+                _folder_clause(folder_id),
                 FileEntry.id != exclude_entry_id,
-                FileEntry.deleted_at.is_(None),
+                _live_entry(),
             )
             .order_by(FileEntry.display_name)
         )
@@ -606,7 +626,7 @@ async def find_first_live_for_file(
     return (
         await db.execute(
             select(FileEntry)
-            .where(FileEntry.file_id == file_id, FileEntry.deleted_at.is_(None))
+            .where(FileEntry.file_id == file_id, _live_entry())
             .order_by(FileEntry.created_at)
             .limit(1)
         )

@@ -16,7 +16,8 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from marginalia.db.models import AuditEvent, Catalog
+from marginalia.db.models import Catalog
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import entries as entries_repo
@@ -29,7 +30,6 @@ from marginalia.tasks.kinds import KIND_RESTRUCTURE_CATALOGS
 from marginalia.utils.ids import new_id
 
 log = logging.getLogger(__name__)
-
 
 async def apply_operations(*, operations: list[dict[str, Any]], now: datetime) -> None:
     """Validate + apply each op; record outcome per op + summary."""
@@ -82,10 +82,8 @@ async def apply_operations(*, operations: list[dict[str, Any]], now: datetime) -
         )
         await session.commit()
 
-
 class _RejectedOp(Exception):
     """A single op fails validation; sibling ops in the batch continue."""
-
 
 def _resolve(ref: str | None, temp_map: dict[str, str]) -> str | None:
     if ref is None:
@@ -96,13 +94,11 @@ def _resolve(ref: str | None, temp_map: dict[str, str]) -> str | None:
         return temp_map[ref]
     return ref
 
-
 async def _load_live(session, catalog_id: str) -> Catalog:
     cat = await session.get(Catalog, catalog_id)
     if cat is None or cat.deleted_at is not None:
         raise _RejectedOp(f"catalog {catalog_id} not found or soft-deleted")
     return cat
-
 
 async def _would_cycle(session, *, child_id: str, new_parent_id: str | None) -> bool:
     """True if setting child.parent_id = new_parent_id would create a cycle."""
@@ -122,7 +118,6 @@ async def _would_cycle(session, *, child_id: str, new_parent_id: str | None) -> 
         cur = row.parent_id
     return False
 
-
 # ----- ops -------------------------------------------------------------------
 
 async def _op_rename(session, op: dict, now: datetime) -> None:
@@ -135,7 +130,7 @@ async def _op_rename(session, op: dict, now: datetime) -> None:
     old_name = cat.name
     cat.name = new_name
     cat.updated_at = now
-    await AuditEvent.append(session, kind="catalog_updated", payload={
+    await audit_events_repo.append(session, kind="catalog_updated", payload={
         "catalog_id": cat.id, "field": "name",
         "old": old_name, "new": new_name,
     })
@@ -145,7 +140,6 @@ async def _op_rename(session, op: dict, now: datetime) -> None:
         outcome="applied",
         detail={"op": "rename", "old": old_name, "new": new_name},
     )
-
 
 async def _op_move(session, op: dict, temp_map: dict, now: datetime) -> None:
     cat = await _load_live(session, op["catalog_id"])
@@ -161,7 +155,7 @@ async def _op_move(session, op: dict, temp_map: dict, now: datetime) -> None:
     old_parent = cat.parent_id
     cat.parent_id = new_parent_id
     cat.updated_at = now
-    await AuditEvent.append(session, kind="catalog_moved", payload={
+    await audit_events_repo.append(session, kind="catalog_moved", payload={
         "catalog_id": cat.id, "old_parent": old_parent, "new_parent": new_parent_id,
     })
     await record_outcome(
@@ -171,13 +165,12 @@ async def _op_move(session, op: dict, temp_map: dict, now: datetime) -> None:
         detail={"op": "move", "old_parent": old_parent, "new_parent": new_parent_id},
     )
 
-
 async def _op_update_extra(session, op: dict, now: datetime) -> None:
     cat = await _load_live(session, op["catalog_id"])
     new_extra = op.get("extra") or None
     cat.extra = new_extra
     cat.updated_at = now
-    await AuditEvent.append(session, kind="catalog_updated", payload={
+    await audit_events_repo.append(session, kind="catalog_updated", payload={
         "catalog_id": cat.id, "field": "extra",
     })
     await record_outcome(
@@ -186,7 +179,6 @@ async def _op_update_extra(session, op: dict, now: datetime) -> None:
         outcome="applied",
         detail={"op": "update_extra"},
     )
-
 
 async def _op_create(session, op: dict, temp_map: dict, now: datetime) -> None:
     temp_id = op.get("temp_id")
@@ -211,7 +203,7 @@ async def _op_create(session, op: dict, temp_map: dict, now: datetime) -> None:
     session.add(cat)
     await session.flush()
     temp_map[temp_id] = real_id
-    await AuditEvent.append(session, kind="catalog_updated", payload={
+    await audit_events_repo.append(session, kind="catalog_updated", payload={
         "catalog_id": real_id, "field": "create",
         "name": name, "parent_id": parent_id,
     })
@@ -221,7 +213,6 @@ async def _op_create(session, op: dict, temp_map: dict, now: datetime) -> None:
         outcome="applied",
         detail={"op": "create", "temp_id": temp_id, "name": name, "parent_id": parent_id},
     )
-
 
 async def _op_soft_delete(session, op: dict, temp_map: dict, now: datetime) -> None:
     cat = await _load_live(session, op["catalog_id"])
@@ -236,7 +227,7 @@ async def _op_soft_delete(session, op: dict, temp_map: dict, now: datetime) -> N
     for child in children:
         child.parent_id = merge_into
         child.updated_at = now
-        await AuditEvent.append(session, kind="catalog_moved", payload={
+        await audit_events_repo.append(session, kind="catalog_moved", payload={
             "catalog_id": child.id, "old_parent": cat.id, "new_parent": merge_into,
             "reason": "parent_soft_deleted",
         })
@@ -249,7 +240,7 @@ async def _op_soft_delete(session, op: dict, temp_map: dict, now: datetime) -> N
 
     cat.deleted_at = now
     cat.updated_at = now
-    await AuditEvent.append(session, kind="catalog_updated", payload={
+    await audit_events_repo.append(session, kind="catalog_updated", payload={
         "catalog_id": cat.id, "field": "deleted_at", "merge_into": merge_into,
         "entries_reassigned": n_entries,
         "children_reassigned": len(children),
@@ -265,7 +256,6 @@ async def _op_soft_delete(session, op: dict, temp_map: dict, now: datetime) -> N
             "entries_reassigned": n_entries,
         },
     )
-
 
 async def _op_move_entries(session, op: dict, temp_map: dict, now: datetime) -> None:
     target_id = _resolve(op.get("target_catalog_id"), temp_map)

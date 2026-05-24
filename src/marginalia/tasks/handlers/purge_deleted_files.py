@@ -30,7 +30,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from marginalia.db.models import AuditEvent
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import files as files_repo
@@ -45,10 +45,8 @@ from marginalia.tasks.kinds import KIND_PURGE_DELETED_FILES, task_handler
 
 log = logging.getLogger(__name__)
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 @task_handler(KIND_PURGE_DELETED_FILES)
 async def handle_purge_deleted_files(payload: Mapping[str, Any]) -> None:
@@ -66,7 +64,7 @@ async def handle_purge_deleted_files(payload: Mapping[str, Any]) -> None:
             entry_id = entry.id
             file_id = entry.file_id
             await entries_repo.hard_delete_by_id(session, entry_id)
-            await AuditEvent.append(
+            await audit_events_repo.append(
                 session,
                 kind="entry_purged",
                 payload={
@@ -90,7 +88,7 @@ async def handle_purge_deleted_files(payload: Mapping[str, Any]) -> None:
                     continue
                 storage_key = file_row.storage_key
                 await files_repo.hard_delete_by_id(session, file_id)
-                await AuditEvent.append(
+                await audit_events_repo.append(
                     session,
                     kind="file_purged",
                     payload={
@@ -127,7 +125,6 @@ async def handle_purge_deleted_files(payload: Mapping[str, Any]) -> None:
             "purge_deleted_files: entries=%d files=%d", entries_purged, files_purged
         )
 
-
 async def _delete_storage_object(
     storage: StorageBackend, *, file_id: str, key: str
 ) -> None:
@@ -137,7 +134,7 @@ async def _delete_storage_object(
         log.exception("storage delete failed for file %s key %s", file_id, key)
         try:
             async with session_scope() as session:
-                await AuditEvent.append(
+                await audit_events_repo.append(
                     session,
                     kind="storage_delete_failed",
                     payload={"file_id": file_id, "storage_key": key, "error": repr(exc)},

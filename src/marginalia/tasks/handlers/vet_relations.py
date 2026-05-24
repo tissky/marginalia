@@ -40,7 +40,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Mapping
 
-from marginalia.db.models import AuditEvent
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage, ChatRequest, TextBlock, get_chat_client,
@@ -61,7 +61,6 @@ MIN_OBSERVATION_TO_VET = 2  # don't waste LLM tokens on 1-time blips
 VET_TTL_DAYS = 180
 REFRESH_GROWTH_FACTOR = 2  # current_count >= 2 * snapshot + buffer
 REFRESH_GROWTH_BUFFER = 5
-
 
 VET_RELATIONS_SYSTEM = """You are Marginalia's relation gatekeeper.
 
@@ -89,7 +88,6 @@ candidate:
   - reason: one short sentence explaining the verdict; will be stored
     as audit context for future maintainers."""
 
-
 VET_RELATIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -111,10 +109,8 @@ VET_RELATIONS_SCHEMA: dict[str, Any] = {
     },
 }
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def _ensure_aware(dt: datetime) -> datetime:
     """SQLite returns naive datetimes even on timezone=True columns; we
@@ -122,7 +118,6 @@ def _ensure_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
-
 
 @task_handler(KIND_VET_RELATIONS)
 async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
@@ -181,7 +176,7 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
                     vetted_at=now,
                     vetted_observation_count=cand["observation_count"],
                 )
-                await AuditEvent.append(
+                await audit_events_repo.append(
                     session,
                     kind="relation_vetted",
                     payload={
@@ -257,7 +252,6 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
         len(candidates), yes_count, no_count, failed_count,
     )
 
-
 async def _fetch_candidates(
     *, cap: int, min_obs: int, ttl_cutoff: datetime,
 ) -> list[dict[str, Any]]:
@@ -311,7 +305,6 @@ async def _fetch_candidates(
             if len(out) >= cap:
                 break
         return out
-
 
 async def _ask_llm(
     client, chunk: list[dict[str, Any]]

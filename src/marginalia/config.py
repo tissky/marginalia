@@ -107,30 +107,34 @@ class LlmProfile:
     model: str
 
 
+LLM_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision", "audio")
+# Profiles users actually rely on out of the box. `audio` is opt-in (only used
+# when a media pipeline calls transcription) so we don't require it.
+_REQUIRED_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision")
+
+
+def _profile_field(settings: Settings, profile: str, field: str) -> object:
+    """Read a per-profile override, falling back to the matching default."""
+    override = getattr(settings, f"llm_{profile}_{field}")
+    return override if override is not None else getattr(settings, f"llm_default_{field}")
+
+
 def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
-    """Resolve `profile` ('chat'/'reflect'/'ingest'/'vision'/'audio') against
-    `LLM_<PROFILE>_*` overrides, falling back to `LLM_DEFAULT_*` per-field."""
-    if profile not in ("chat", "reflect", "ingest", "vision", "audio"):
+    """Resolve `profile` (one of LLM_PROFILES) against `LLM_<PROFILE>_*`
+    overrides, falling back to `LLM_DEFAULT_*` per-field."""
+    if profile not in LLM_PROFILES:
         raise ValueError(f"unknown LLM profile: {profile!r}")
-
-    p = profile
-    provider = getattr(settings, f"llm_{p}_provider") or settings.llm_default_provider
-    api_key = getattr(settings, f"llm_{p}_api_key") or settings.llm_default_api_key
-    base_url = getattr(settings, f"llm_{p}_base_url") or settings.llm_default_base_url
-    model = getattr(settings, f"llm_{p}_model") or settings.llm_default_model
-
     return LlmProfile(
-        name=p, provider=provider, api_key=api_key, base_url=base_url, model=model
+        name=profile,
+        provider=_profile_field(settings, profile, "provider"),  # type: ignore[arg-type]
+        api_key=_profile_field(settings, profile, "api_key"),  # type: ignore[arg-type]
+        base_url=_profile_field(settings, profile, "base_url"),  # type: ignore[arg-type]
+        model=_profile_field(settings, profile, "model"),  # type: ignore[arg-type]
     )
 
 
 class LlmConfigError(RuntimeError):
     """Startup-time LLM configuration is incomplete or inconsistent."""
-
-
-# Profiles users actually rely on out of the box. `audio` is opt-in (only used
-# when a media pipeline calls transcription) so we don't require it.
-_REQUIRED_PROFILES = ("chat", "reflect", "ingest", "vision")
 
 
 def validate_llm_config(settings: Settings) -> None:
@@ -144,14 +148,7 @@ def validate_llm_config(settings: Settings) -> None:
     can satisfy this either via its own `LLM_<PROFILE>_API_KEY` or by inheriting
     `LLM_DEFAULT_API_KEY`.
     """
-    missing: list[str] = []
-    for profile in _REQUIRED_PROFILES:
-        key = (
-            getattr(settings, f"llm_{profile}_api_key")
-            or settings.llm_default_api_key
-        )
-        if not key:
-            missing.append(profile)
+    missing = [p for p in _REQUIRED_PROFILES if not _profile_field(settings, p, "api_key")]
     if missing:
         raise LlmConfigError(
             "LLM api_key is not configured for required profile(s): "

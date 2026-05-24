@@ -5,7 +5,6 @@ import logging
 import os
 import socket
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
 
 from marginalia.config import Settings, get_settings
 from marginalia.db.session import session_scope
@@ -81,7 +80,6 @@ class TaskRunner:
                 session,
                 now=now,
                 limit=limit,
-                use_skip_locked=self.settings.db_backend == "postgres",
             )
             if not rows:
                 await session.commit()
@@ -169,12 +167,6 @@ async def main() -> None:
         await asyncio.Event().wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         await runner.stop()
-
-
-def _try_recover_stale(unused_iterable: Iterable[None] = ()) -> None:
-    """Reserved for future: rescue running rows whose lease expired before their
-    worker could finish (worker crashed). Implementation deferred."""
-    return None
 
 
 if __name__ == "__main__":

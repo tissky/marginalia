@@ -29,7 +29,8 @@ from typing import Callable, Iterable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.engine import get_session_factory
-from marginalia.db.models import AuditEvent, File, FileEntry
+from marginalia.repositories import audit_events as audit_events_repo
+from marginalia.db.models import File, FileEntry
 from marginalia.services.entries import (
     move_entry,
     rename_entry,
@@ -46,14 +47,12 @@ from marginalia.utils.ids import new_id
 
 log = logging.getLogger(__name__)
 
-
 @dataclass(slots=True)
 class SyncFailure:
     """One per-item failure during apply_*. Surfaced to CLI for display."""
     category: str  # 'new' | 'moved' | 'modified' | 'missing'
     target: str    # path string or entry display_name
     error: str
-
 
 async def adopt_disk_file(path: Path, vault_root: Path) -> str:
     """Register a single disk-side file in the db without re-writing
@@ -122,7 +121,7 @@ async def adopt_disk_file(path: Path, vault_root: Path) -> str:
             session.add(entry)
             await session.flush()
 
-            await AuditEvent.append(session, kind="file_uploaded", payload={
+            await audit_events_repo.append(session, kind="file_uploaded", payload={
                 "file_id": file_id, "entry_id": entry.id,
                 "display_name": display_name, "sha256": sha256,
                 "size_bytes": size, "mime_type": mime_type,
@@ -137,7 +136,6 @@ async def adopt_disk_file(path: Path, vault_root: Path) -> str:
         except Exception:
             await session.rollback()
             raise
-
 
 async def ingest_all_new(
     report: ScanReport,
@@ -174,7 +172,6 @@ async def ingest_all_new(
             except Exception:
                 pass  # never let UI break the batch
     return created, failures
-
 
 async def apply_moved(
     report: ScanReport,
@@ -248,7 +245,6 @@ async def apply_moved(
                 ))
     return n, failures
 
-
 async def forget_all_missing(
     report: ScanReport,
 ) -> tuple[int, list[SyncFailure]]:
@@ -273,7 +269,6 @@ async def forget_all_missing(
                     error=f"{type(exc).__name__}: {exc}",
                 ))
     return n, failures
-
 
 async def apply_modified(
     report: ScanReport,
@@ -337,7 +332,6 @@ async def apply_modified(
                     error=f"{type(exc).__name__}: {exc}",
                 ))
     return n, failures
-
 
 async def apply_all(
     report: ScanReport,

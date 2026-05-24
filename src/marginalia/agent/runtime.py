@@ -49,7 +49,6 @@ from marginalia.agent.stable_context import (
 )
 from marginalia.agent.tools import ToolContext, all_tool_defs, get_tool
 from marginalia.agent.types import AgentEvent, AgentTurnError, TurnUsage
-from marginalia.db.models import Conversation
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage,
@@ -224,7 +223,7 @@ async def run_turn(
                 "truncated": outcome.truncated,
             },
         )
-        conv = await db.get(Conversation, conversation_id)
+        conv = await session_service.get_conversation(db, conversation_id)
         usage = TurnUsage(
             input_tokens=conv.total_input_tokens or 0,
             output_tokens=conv.total_output_tokens or 0,
@@ -436,6 +435,55 @@ def _budget_tail(*, turn: int) -> str | None:
     return base
 
 
+async def _persist_tool_call(
+    *,
+    conversation_id: str,
+    name: str,
+    arguments: Any,
+    result: Any,
+    error: str | None,
+    duration_ms: int,
+) -> None:
+    """Persist one tool_call row in its own transaction. Used by all four
+    dispatch paths (unknown / exception / success / dedup-skipped)."""
+    async with session_scope() as db:
+        await session_service.append_tool_call(
+            db,
+            conversation_id=conversation_id,
+            name=name,
+            arguments=arguments,
+            result=result,
+            error=error,
+            duration_ms=duration_ms,
+        )
+        await db.commit()
+
+
+def _emit_failure(
+    *,
+    tc,
+    error: str,
+    result_blocks: list[ToolResultBlock],
+    guard: _CallGuard,
+    key: tuple[str, str],
+) -> AgentEvent:
+    """Build the failure ToolResultBlock + remember it for dedup, return the
+    AgentEvent the caller should yield. Centralizes the `unknown tool` and
+    `exception during handler` paths."""
+    result_blocks.append(ToolResultBlock(
+        tool_call_id=tc.id,
+        content=f"ERROR: {error}",
+        is_error=True,
+    ))
+    guard.remember(key, f"ERROR: {error}")
+    return AgentEvent(
+        event_type="tool_result",
+        data=json.dumps({
+            "name": tc.name, "ok": False, "error": error,
+        }, ensure_ascii=False),
+    )
+
+
 async def _dispatch_tool_calls(
     *,
     tool_calls,
@@ -471,14 +519,10 @@ async def _dispatch_tool_calls(
 
         key = guard.key(tc.name, tc.arguments)
 
-        # Doom-loop check (counts every *attempted* call, including ones
-        # we are about to dedup — repeatedly attempting the same call is
-        # exactly the loop pattern this guard catches).
         if guard.should_nudge(key):
             nudge_pending = True
             guard.nudged = True
 
-        # Dedup: identical call this turn — synthesize without re-running.
         if guard.is_duplicate(key):
             prior = guard.seen[key]
             guard.recent.append(key)  # record the attempt for doom-loop
@@ -502,30 +546,16 @@ async def _dispatch_tool_calls(
         started = time.monotonic()
         if reg is None:
             err = f"unknown tool: {tc.name}"
-            duration_ms = int((time.monotonic() - started) * 1000)
-            async with session_scope() as db:
-                await session_service.append_tool_call(
-                    db,
-                    conversation_id=conversation_id,
-                    name=tc.name,
-                    arguments=tc.arguments,
-                    result=None,
-                    error=err,
-                    duration_ms=duration_ms,
-                )
-                await db.commit()
-            yield AgentEvent(
-                event_type="tool_result",
-                data=json.dumps({
-                    "name": tc.name, "ok": False, "error": err,
-                }, ensure_ascii=False),
+            await _persist_tool_call(
+                conversation_id=conversation_id,
+                name=tc.name, arguments=tc.arguments,
+                result=None, error=err,
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
-            result_blocks.append(ToolResultBlock(
-                tool_call_id=tc.id,
-                content=f"ERROR: {err}",
-                is_error=True,
-            ))
-            guard.remember(key, f"ERROR: {err}")
+            yield _emit_failure(
+                tc=tc, error=err,
+                result_blocks=result_blocks, guard=guard, key=key,
+            )
             continue
 
         try:
@@ -534,30 +564,16 @@ async def _dispatch_tool_calls(
                 await db.commit()
         except Exception as exc:  # noqa: BLE001
             log.exception("tool %s failed", tc.name)
-            duration_ms = int((time.monotonic() - started) * 1000)
-            async with session_scope() as db:
-                await session_service.append_tool_call(
-                    db,
-                    conversation_id=conversation_id,
-                    name=tc.name,
-                    arguments=tc.arguments,
-                    result=None,
-                    error=repr(exc),
-                    duration_ms=duration_ms,
-                )
-                await db.commit()
-            yield AgentEvent(
-                event_type="tool_result",
-                data=json.dumps({
-                    "name": tc.name, "ok": False, "error": repr(exc),
-                }, ensure_ascii=False),
+            await _persist_tool_call(
+                conversation_id=conversation_id,
+                name=tc.name, arguments=tc.arguments,
+                result=None, error=repr(exc),
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
-            result_blocks.append(ToolResultBlock(
-                tool_call_id=tc.id,
-                content=f"ERROR: {exc!r}",
-                is_error=True,
-            ))
-            guard.remember(key, f"ERROR: {exc!r}")
+            yield _emit_failure(
+                tc=tc, error=repr(exc),
+                result_blocks=result_blocks, guard=guard, key=key,
+            )
             continue
 
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -576,16 +592,12 @@ async def _dispatch_tool_calls(
         result_text = json.dumps(result_for_model, ensure_ascii=False)
         if len(result_text) > MAX_TOOL_RESULT_LEN:
             result_text = result_text[:MAX_TOOL_RESULT_LEN] + "...(truncated)"
-        async with session_scope() as db:
-            await session_service.append_tool_call(
-                db,
-                conversation_id=conversation_id,
-                name=tc.name,
-                arguments=tc.arguments,
-                result=result,
-                duration_ms=duration_ms,
-            )
-            await db.commit()
+        await _persist_tool_call(
+            conversation_id=conversation_id,
+            name=tc.name, arguments=tc.arguments,
+            result=result, error=None,
+            duration_ms=duration_ms,
+        )
         if user_only is not None:
             yield AgentEvent(
                 event_type="user_artifact",

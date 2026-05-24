@@ -17,14 +17,13 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import AuditEvent, Folder
+from marginalia.db.models import Folder
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import folders as folders_repo
 from marginalia.utils.ids import new_id
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 class AmbiguousRemotePathError(ValueError):
     """Raised when a remote path's intent (file vs folder) is unresolvable.
@@ -42,7 +41,6 @@ class AmbiguousRemotePathError(ValueError):
             f"to mean file."
         )
         self.remote = remote
-
 
 def split_remote_path(
     remote: str,
@@ -90,7 +88,6 @@ def split_remote_path(
         return parts, display_name_override
     raise AmbiguousRemotePathError(remote)
 
-
 def parse_remote_folder(remote: str) -> list[str]:
     """Pure-folder split, ignoring file-name heuristics. Used internally where
     the caller has already decided the remote is a folder."""
@@ -98,7 +95,6 @@ def parse_remote_folder(remote: str) -> list[str]:
     if not s or s == "/":
         return []
     return [p for p in s.strip("/").split("/") if p]
-
 
 async def resolve_or_create_folder(
     db: AsyncSession, segments: list[str]
@@ -114,7 +110,6 @@ async def resolve_or_create_folder(
     for name in segments:
         parent = await _find_or_create_child(db, parent, name)
     return parent
-
 
 async def _find_or_create_child(
     db: AsyncSession, parent: Folder | None, name: str
@@ -136,7 +131,7 @@ async def _find_or_create_child(
     )
     db.add(folder)
     await db.flush()
-    await AuditEvent.append(
+    await audit_events_repo.append(
         db, kind="folder_created", payload={
             "folder_id": folder.id, "parent_id": parent_id,
             "name": name, "auto_created": True,
@@ -144,24 +139,19 @@ async def _find_or_create_child(
     )
     return folder
 
-
 async def list_root_folders(db: AsyncSession) -> list[Folder]:
     return await folders_repo.list_children(db, None)
-
 
 async def list_child_folders(db: AsyncSession, parent_id: str) -> list[Folder]:
     return await folders_repo.list_children(db, parent_id)
 
-
 async def get_folder(db: AsyncSession, folder_id: str) -> Folder | None:
     return await folders_repo.get_live(db, folder_id)
-
 
 # ---- user-side mutations (design.md §14.1) ---------------------------------
 
 class FolderNotFoundError(Exception):
     pass
-
 
 class FolderNameConflictError(Exception):
     """Raised when renaming/moving a folder would collide with a sibling."""
@@ -171,7 +161,6 @@ class FolderNameConflictError(Exception):
         self.parent_id = parent_id
         self.name = name
         self.existing_id = existing_id
-
 
 async def _would_cycle(
     db: AsyncSession, *, child_id: str, new_parent_id: str | None
@@ -191,7 +180,6 @@ async def _would_cycle(
             return False
         cur = f.parent_id
     return False
-
 
 async def rename_folder(
     db: AsyncSession, *, folder_id: str, new_name: str,
@@ -214,12 +202,11 @@ async def rename_folder(
     old = f.name
     f.name = new_name
     f.updated_at = _utcnow()
-    await AuditEvent.append(db, kind="folder_renamed", payload={
+    await audit_events_repo.append(db, kind="folder_renamed", payload={
         "folder_id": f.id, "parent_id": f.parent_id,
         "old_name": old, "new_name": new_name,
     })
     return f
-
 
 async def move_folder(
     db: AsyncSession, *, folder_id: str, new_parent_id: str | None,
@@ -245,11 +232,10 @@ async def move_folder(
     old_parent = f.parent_id
     f.parent_id = new_parent_id
     f.updated_at = _utcnow()
-    await AuditEvent.append(db, kind="folder_moved", payload={
+    await audit_events_repo.append(db, kind="folder_moved", payload={
         "folder_id": f.id, "old_parent": old_parent, "new_parent": new_parent_id,
     })
     return f
-
 
 async def soft_delete_folder(
     db: AsyncSession,
@@ -284,7 +270,7 @@ async def soft_delete_folder(
         e.purge_after = purge_at
         e.updated_at = now
 
-    await AuditEvent.append(db, kind="folder_soft_deleted", payload={
+    await audit_events_repo.append(db, kind="folder_soft_deleted", payload={
         "folder_id": f.id,
         "name": f.name,
         "descendant_folders_marked": n_folders,

@@ -30,7 +30,8 @@ from typing import AsyncIterator, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import AuditEvent, EntryTag, File, FileEntry
+from marginalia.db.models import EntryTag, File, FileEntry
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import files as files_repo
@@ -47,9 +48,7 @@ from marginalia.tasks.kinds import KIND_INGEST_FILE
 from marginalia.utils.hashing import StreamHasher
 from marginalia.utils.ids import new_id, storage_prefix
 
-
 _NameConflictPolicy = Literal["rename", "error", "skip"]
-
 
 def _resolve_default_on_conflict() -> _NameConflictPolicy:
     # Resolved once at module import; env-driven via DEFAULT_ON_CONFLICT
@@ -58,9 +57,7 @@ def _resolve_default_on_conflict() -> _NameConflictPolicy:
     from marginalia.config import get_settings
     return get_settings().default_on_conflict
 
-
 DEFAULT_ON_CONFLICT: _NameConflictPolicy = _resolve_default_on_conflict()
-
 
 @dataclass(slots=True)
 class UploadResult:
@@ -71,7 +68,6 @@ class UploadResult:
     deduped: bool          # True if sha256 hit an existing file
     auto_renamed: bool     # True if display_name was suffixed (rename policy)
     skipped: bool = False  # True if skip policy returned a pre-existing entry
-
 
 class DisplayNameConflictError(Exception):
     """Raised when on_conflict='error' and the target name is taken.
@@ -95,11 +91,9 @@ class DisplayNameConflictError(Exception):
         self.existing_entry_id = existing_entry_id
         self.existing_file_id = existing_file_id
 
-
 def _make_storage_key(file_id: str) -> str:
     top, sub = storage_prefix(file_id)
     return f"{top}/{sub}/{file_id}"
-
 
 def _split_extension(name: str) -> tuple[str, str]:
     """Split into (stem, ext_with_dot). 'a.tar.gz' → ('a.tar', '.gz')."""
@@ -108,14 +102,12 @@ def _split_extension(name: str) -> tuple[str, str]:
         return name, ""
     return stem, f".{ext}"
 
-
 async def _existing_entry_with_name(
     session: AsyncSession, folder_id: str | None, name: str
 ) -> FileEntry | None:
     return await entries_repo.find_live_by_folder_and_name(
         session, folder_id, name,
     )
-
 
 async def _resolve_display_name(
     session: AsyncSession, folder_id: str | None, desired: str
@@ -129,7 +121,6 @@ async def _resolve_display_name(
             return candidate, n > 0
         n += 1
         candidate = f"{stem} ({n}){ext}"
-
 
 async def upload(
     session: AsyncSession,
@@ -234,7 +225,6 @@ async def upload(
         now=now,
     )
 
-
 async def _create_new_file_entry(
     session: AsyncSession,
     *,
@@ -267,7 +257,7 @@ async def _create_new_file_entry(
     )
     session.add(file_row)
     await session.flush()
-    await AuditEvent.append(
+    await audit_events_repo.append(
         session,
         kind="file_created",
         payload={
@@ -294,7 +284,7 @@ async def _create_new_file_entry(
     )
     session.add(entry)
     await session.flush()
-    await AuditEvent.append(
+    await audit_events_repo.append(
         session,
         kind="entry_created",
         payload={
@@ -313,7 +303,7 @@ async def _create_new_file_entry(
         dedup_key=f"ingest_file:{file_row.id}",
     )
     if task is not None:
-        await AuditEvent.append(
+        await audit_events_repo.append(
             session,
             kind="task_enqueued",
             payload={"task_id": task.id, "kind": KIND_INGEST_FILE, "file_id": file_row.id},
@@ -328,7 +318,6 @@ async def _create_new_file_entry(
         deduped=False,
         auto_renamed=auto_renamed,
     )
-
 
 async def _create_dedup_entry(
     session: AsyncSession,
@@ -370,7 +359,7 @@ async def _create_dedup_entry(
                 )
             )
 
-    await AuditEvent.append(
+    await audit_events_repo.append(
         session,
         kind="entry_created",
         payload={

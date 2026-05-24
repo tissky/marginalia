@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from marginalia.db.models import AuditEvent
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import journal as journal_repo
@@ -53,10 +53,8 @@ PHASE_OUTCOME_KIND = {
     "archive": "suggest_archival",
 }
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 @dataclass(slots=True)
 class _Decision:
@@ -64,7 +62,6 @@ class _Decision:
     old_lifecycle: str
     new_lifecycle: str
     reason: str
-
 
 @task_handler(KIND_SUGGEST_LIFECYCLE)
 async def handle_suggest_lifecycle(payload: Mapping[str, Any]) -> None:
@@ -84,7 +81,6 @@ async def handle_suggest_lifecycle(payload: Mapping[str, Any]) -> None:
         summary[phase] = {"applied": applied, "candidates": candidates}
 
     log.info("suggest_lifecycle: %s", summary)
-
 
 async def _run_demote(
     now: datetime, payload: Mapping[str, Any]
@@ -111,7 +107,6 @@ async def _run_demote(
         },
     ), len(decisions)
 
-
 async def _run_archive(
     now: datetime, payload: Mapping[str, Any]
 ) -> tuple[int, int]:
@@ -137,7 +132,6 @@ async def _run_archive(
         },
     ), len(decisions)
 
-
 async def _recent_entry_ids(session, cutoff: datetime) -> set[str]:
     arrays = await journal_repo.list_entry_id_arrays_since(session, cutoff)
     out: set[str] = set()
@@ -146,7 +140,6 @@ async def _recent_entry_ids(session, cutoff: datetime) -> set[str]:
             if isinstance(eid, str):
                 out.add(eid)
     return out
-
 
 async def _select_demotion_candidates(
     *, cutoff_recent_journal: datetime, cutoff_age: datetime, cap: int,
@@ -170,7 +163,6 @@ async def _select_demotion_candidates(
         await session.commit()
     return decisions
 
-
 async def _select_archival_candidates(
     *, cutoff_recent_journal: datetime, cutoff_demoted: datetime, cap: int,
 ) -> list[_Decision]:
@@ -192,7 +184,6 @@ async def _select_archival_candidates(
                 break
         await session.commit()
     return decisions
-
 
 async def _apply_decisions(
     *,
@@ -226,7 +217,7 @@ async def _apply_decisions(
                 )
                 continue
 
-            await AuditEvent.append(
+            await audit_events_repo.append(
                 session,
                 kind="lifecycle_changed",
                 payload={

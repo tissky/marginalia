@@ -28,7 +28,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-from marginalia.db.models import AuditEvent, Tag, TagAlias
+from marginalia.db.models import Tag, TagAlias
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
 from marginalia.repositories import tags as tags_repo
@@ -44,7 +45,6 @@ log = logging.getLogger(__name__)
 FACETS = ("topic", "form", "time", "source", "language", "extra")
 BATCH_SIZE = 60  # per-facet tag count cap fed to the model in one call
 MIN_TAGS_TO_NORMALIZE = 2  # one LLM call per facet, even tiny ones (cheap; might find a real synonym)
-
 
 NORMALIZE_SYSTEM = """You are Marginalia's tag-vocabulary editor.
 
@@ -64,7 +64,6 @@ Rules:
     / case differences / ASCII↔Unicode differences
   - if no clean merges exist, return {"merges": []}
 """
-
 
 NORMALIZE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -90,10 +89,8 @@ NORMALIZE_SCHEMA: dict[str, Any] = {
     },
 }
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 async def handle_normalize_tags(payload: Mapping[str, Any]) -> None:
     total_merges_applied = 0
@@ -130,7 +127,6 @@ async def handle_normalize_tags(payload: Mapping[str, Any]) -> None:
             "normalize_tags: %d merges across %d facets, %d entry_tags rewritten",
             total_merges_applied, len(facets_processed), total_tags_redirected,
         )
-
 
 async def _normalize_one_facet(facet: str) -> dict[str, int] | None:
     """Return None if the facet was skipped (too few tags), else stats dict."""
@@ -200,7 +196,6 @@ async def _normalize_one_facet(facet: str) -> dict[str, int] | None:
 
     return {"merges_applied": merges_applied, "tags_redirected": tags_redirected}
 
-
 async def _apply_one_merge(
     session,
     *,
@@ -256,7 +251,7 @@ async def _apply_one_merge(
         merged.alias_of = canonical_id
         merged.updated_at = now
 
-        await AuditEvent.append(
+        await audit_events_repo.append(
             session,
             kind="tag_merged",
             payload={
@@ -272,7 +267,6 @@ async def _apply_one_merge(
     canonical.last_used_at = now
     canonical.updated_at = now
     return entry_tags_redirected
-
 
 async def _recompute_doc_counts(session) -> None:
     """Set tags.doc_count = COUNT(entry_tags WHERE tag_id = tags.id) for every tag.

@@ -22,7 +22,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from marginalia.db.models import AuditEvent
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import audit_events as audit_repo
 from marginalia.repositories import task_outcomes as task_outcomes_repo
@@ -41,10 +41,8 @@ DEFAULT_RETENTION_DAYS: Mapping[str, int] = {
 }
 ALL_TARGETS = ("audit_events", "task_outcomes")
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 @task_handler(KIND_PRUNE)
 async def handle_prune(payload: Mapping[str, Any]) -> None:
@@ -91,18 +89,16 @@ async def handle_prune(payload: Mapping[str, Any]) -> None:
         )
         await session.commit()
 
-
 async def _prune_audit_events(session, cutoff: datetime) -> tuple[int, datetime | None]:
     oldest = await audit_repo.oldest_occurred_at(session)
     deleted = await audit_repo.delete_before(session, cutoff)
     if deleted:
-        await AuditEvent.append(
+        await audit_events_repo.append(
             session,
             kind="audit_events_pruned",
             payload={"deleted": deleted, "cutoff": cutoff.isoformat()},
         )
     return deleted, oldest
-
 
 async def _prune_task_outcomes(session, cutoff: datetime) -> tuple[int, datetime | None]:
     oldest = await task_outcomes_repo.oldest_completed_at(session)

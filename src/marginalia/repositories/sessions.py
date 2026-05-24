@@ -100,6 +100,13 @@ async def last_conversation_id(
     ).scalar_one_or_none()
 
 
+async def get_conversation(
+    db: AsyncSession, conversation_id: str,
+) -> Conversation | None:
+    """Load a conversation row by id (None if missing)."""
+    return await db.get(Conversation, conversation_id)
+
+
 async def list_for_session(
     db: AsyncSession, session_id: str,
 ) -> list[Conversation]:
