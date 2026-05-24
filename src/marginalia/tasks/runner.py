@@ -7,12 +7,9 @@ import socket
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
-
 from marginalia.config import Settings, get_settings
-from marginalia.db.models.tasks import Task
 from marginalia.db.session import session_scope
+from marginalia.repositories import tasks as tasks_repo
 from marginalia.tasks import handlers as _handlers_pkg  # noqa: F401  (register)
 from marginalia.tasks.kinds import get_handler
 
@@ -80,51 +77,28 @@ class TaskRunner:
         now = _now()
         lease_until = now + timedelta(seconds=self.settings.worker_lease_seconds)
         async with session_scope() as session:
-            if self.settings.db_backend == "postgres":
-                rows = (
-                    await session.execute(
-                        select(Task.id)
-                        .where(
-                            Task.status == "pending",
-                            Task.scheduled_at <= now,
-                        )
-                        .order_by(Task.priority.asc(), Task.scheduled_at.asc())
-                        .limit(limit)
-                        .with_for_update(skip_locked=True)
-                    )
-                ).scalars().all()
-            else:
-                rows = (
-                    await session.execute(
-                        select(Task.id)
-                        .where(
-                            Task.status == "pending",
-                            Task.scheduled_at <= now,
-                        )
-                        .order_by(Task.priority.asc(), Task.scheduled_at.asc())
-                        .limit(limit)
-                    )
-                ).scalars().all()
+            rows = await tasks_repo.claim_pending_ids(
+                session,
+                now=now,
+                limit=limit,
+                use_skip_locked=self.settings.db_backend == "postgres",
+            )
             if not rows:
                 await session.commit()
                 return []
-            await session.execute(
-                update(Task)
-                .where(Task.id.in_(rows), Task.status == "pending")
-                .values(
-                    status="running",
-                    locked_by=self.worker_id,
-                    lease_expires_at=lease_until,
-                    started_at=now,
-                    attempts=Task.attempts + 1,
-                )
+            await tasks_repo.mark_running(
+                session,
+                ids=rows,
+                now=now,
+                lease_until=lease_until,
+                worker_id=self.worker_id,
             )
             await session.commit()
             return list(rows)
 
     async def _process(self, task_id: str) -> None:
         async with session_scope() as session:
-            task = await session.get(Task, task_id)
+            task = await tasks_repo.get(session, task_id)
             if task is None or task.status != "running":
                 return
             handler = get_handler(task.kind)
@@ -149,17 +123,7 @@ class TaskRunner:
             heartbeat.cancel()
 
         async with session_scope() as session:
-            await session.execute(
-                update(Task)
-                .where(Task.id == task_id)
-                .values(
-                    status="done",
-                    finished_at=_now(),
-                    last_error=None,
-                    lease_expires_at=None,
-                    locked_by=None,
-                )
-            )
+            await tasks_repo.mark_done(session, task_id=task_id, now=_now())
             await session.commit()
 
     async def _heartbeat(self, task_id: str) -> None:
@@ -168,13 +132,12 @@ class TaskRunner:
             while True:
                 await asyncio.sleep(interval)
                 async with session_scope() as session:
-                    await session.execute(
-                        update(Task)
-                        .where(Task.id == task_id, Task.status == "running")
-                        .values(
-                            lease_expires_at=_now()
-                            + timedelta(seconds=self.settings.worker_lease_seconds)
-                        )
+                    await tasks_repo.heartbeat(
+                        session,
+                        task_id=task_id,
+                        lease_until=_now() + timedelta(
+                            seconds=self.settings.worker_lease_seconds,
+                        ),
                     )
                     await session.commit()
         except asyncio.CancelledError:
@@ -185,28 +148,15 @@ class TaskRunner:
     ) -> None:
         async with session_scope() as session:
             if attempts >= max_attempts:
-                await session.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(
-                        status="dead",
-                        last_error=error,
-                        finished_at=_now(),
-                        lease_expires_at=None,
-                        locked_by=None,
-                    )
+                await tasks_repo.mark_dead(
+                    session, task_id=task_id, now=_now(), error=error,
                 )
             else:
-                await session.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(
-                        status="pending",
-                        last_error=error,
-                        scheduled_at=_now() + _backoff(attempts),
-                        lease_expires_at=None,
-                        locked_by=None,
-                    )
+                await tasks_repo.reschedule_for_retry(
+                    session,
+                    task_id=task_id,
+                    error=error,
+                    next_run_at=_now() + _backoff(attempts),
                 )
             await session.commit()
 

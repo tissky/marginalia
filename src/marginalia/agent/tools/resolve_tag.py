@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import Tag, TagAlias
+from marginalia.db.models import Tag
+from marginalia.repositories import tags as tags_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -49,11 +49,7 @@ async def resolve_tag(
     name = args["name"]
     facet = args.get("facet")
 
-    # 1. direct match in tags
-    stmt = select(Tag).where(Tag.name == name)
-    if facet is not None:
-        stmt = stmt.where(Tag.facet == facet)
-    direct = (await db.execute(stmt)).scalars().all()
+    direct = await tags_repo.find_by_name(db, name, facet=facet)
     for t in direct:
         canonical = t
         if t.alias_of is not None:
@@ -70,12 +66,7 @@ async def resolve_tag(
             "was_alias": t.alias_of is not None,
         }
 
-    # 2. fallback through tag_aliases
-    alias_rows = (
-        await db.execute(
-            select(TagAlias).where(TagAlias.from_name == name)
-        )
-    ).scalars().all()
+    alias_rows = await tags_repo.list_aliases_from(db, name)
     for ar in alias_rows:
         canon = await db.get(Tag, ar.to_tag_id)
         if canon is None:

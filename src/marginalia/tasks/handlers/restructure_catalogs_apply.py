@@ -16,10 +16,10 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
-
-from marginalia.db.models import AuditEvent, Catalog, FileEntry
+from marginalia.db.models import AuditEvent, Catalog
 from marginalia.db.session import session_scope
+from marginalia.repositories import catalogs as catalogs_repo
+from marginalia.repositories import entries as entries_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -232,11 +232,7 @@ async def _op_soft_delete(session, op: dict, temp_map: dict, now: datetime) -> N
         await _load_live(session, merge_into)
 
     # Reassign children
-    children = (
-        await session.execute(
-            select(Catalog).where(Catalog.parent_id == cat.id, Catalog.deleted_at.is_(None))
-        )
-    ).scalars().all()
+    children = await catalogs_repo.list_live_children_of(session, cat.id)
     for child in children:
         child.parent_id = merge_into
         child.updated_at = now
@@ -247,13 +243,9 @@ async def _op_soft_delete(session, op: dict, temp_map: dict, now: datetime) -> N
 
     # Reassign entries
     target = merge_into  # may be None → uncategorised
-    n_entries = (
-        await session.execute(
-            update(FileEntry)
-            .where(FileEntry.catalog_id == cat.id)
-            .values(catalog_id=target, updated_at=now)
-        )
-    ).rowcount or 0
+    n_entries = await catalogs_repo.reassign_entries_catalog(
+        session, from_catalog_id=cat.id, to_catalog_id=target, now=now,
+    )
 
     cat.deleted_at = now
     cat.updated_at = now
@@ -284,25 +276,15 @@ async def _op_move_entries(session, op: dict, temp_map: dict, now: datetime) -> 
         raise _RejectedOp("move_entries: entry_ids empty")
 
     # Validate entries exist + live
-    existing_rows = (
-        await session.execute(
-            select(FileEntry.id).where(
-                FileEntry.id.in_(entry_ids),
-                FileEntry.deleted_at.is_(None),
-            )
-        )
-    ).scalars().all()
-    valid = set(existing_rows)
+    valid = set(await entries_repo.filter_live_ids(session, entry_ids))
     moved = 0
     for eid in entry_ids:
         if eid not in valid:
             continue
-        result = await session.execute(
-            update(FileEntry)
-            .where(FileEntry.id == eid, FileEntry.deleted_at.is_(None))
-            .values(catalog_id=target_id, updated_at=now)
+        rc = await catalogs_repo.move_entry_to_catalog(
+            session, entry_id=eid, catalog_id=target_id, now=now,
         )
-        if result.rowcount:
+        if rc:
             moved += 1
 
     if moved == 0:

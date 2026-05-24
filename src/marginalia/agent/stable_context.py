@@ -15,16 +15,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import (
-    Catalog,
-    FileEntry,
-    Journal,
-    Tag,
-    View,
-)
+from marginalia.repositories import catalogs as catalogs_repo
+from marginalia.repositories import journal as journal_repo
+from marginalia.repositories import tags as tags_repo
+from marginalia.repositories import views as views_repo
 
 
 AGENT_IDENTITY = """你是 Marginalia 的在线调查员（🔍 Investigator）。
@@ -76,28 +72,10 @@ INSIGHT_RECENT_DAYS = 180
 async def build_stable_snapshot(db: AsyncSession) -> dict[str, Any]:
     """Build the structured snapshot the agent's stable system prompt
     embeds. Keep small + deterministic so prompt cache works."""
-    # ---- 1. catalog top level (with doc_count) -----------------------------
-    top_cats = (
-        await db.execute(
-            select(Catalog)
-            .where(Catalog.parent_id.is_(None), Catalog.deleted_at.is_(None))
-            .order_by(Catalog.name)
-            .limit(TOP_LEVEL_CATALOGS_LIMIT)
-        )
-    ).scalars().all()
-
-    cat_counts_rows = (
-        await db.execute(
-            select(FileEntry.catalog_id, func.count())
-            .where(
-                FileEntry.catalog_id.isnot(None),
-                FileEntry.deleted_at.is_(None),
-            )
-            .group_by(FileEntry.catalog_id)
-        )
-    ).all()
-    cat_counts = {cid: c for cid, c in cat_counts_rows}
-
+    top_cats = await catalogs_repo.list_live_top_level(
+        db, limit=TOP_LEVEL_CATALOGS_LIMIT,
+    )
+    cat_counts = await catalogs_repo.direct_entry_counts(db)
     catalog_view = [
         {
             "id": c.id,
@@ -108,51 +86,29 @@ async def build_stable_snapshot(db: AsyncSession) -> dict[str, Any]:
         for c in top_cats
     ]
 
-    # ---- 2. views ---------------------------------------------------------
-    views = (
-        await db.execute(
-            select(View).order_by(View.name).limit(VIEWS_LIMIT)
-        )
-    ).scalars().all()
+    views = await views_repo.list_for_snapshot(db, limit=VIEWS_LIMIT)
     view_view = [
         {"id": v.id, "name": v.name, "summary": v.summary}
         for v in views
     ]
 
-    # ---- 3. tag vocabulary by facet --------------------------------------
     tags_by_facet: dict[str, list[dict[str, Any]]] = {}
     for facet in ("topic", "form", "time", "source", "language", "extra"):
-        rows = (
-            await db.execute(
-                select(Tag.id, Tag.name, Tag.doc_count)
-                .where(Tag.facet == facet, Tag.alias_of.is_(None))
-                .order_by(Tag.doc_count.desc(), Tag.name)
-                .limit(TAG_TOP_PER_FACET)
-            )
-        ).all()
+        rows = await tags_repo.top_per_facet(
+            db, facet, limit=TAG_TOP_PER_FACET,
+        )
         if rows:
             tags_by_facet[facet] = [
                 {"id": tid, "name": n, "doc_count": dc or 0}
                 for tid, n, dc in rows
             ]
 
-    # ---- 4. active insights (durable cross-session memory) ---------------
     # Per [[journal-tiers]]: only `source_kind='insight'` rows are durable;
     # `reflect_turn` rows are session-scoped and don't belong in the prefix.
-    # Hide superseded rows so the chain replacement IS the answer.
     cutoff = datetime.now(timezone.utc) - timedelta(days=INSIGHT_RECENT_DAYS)
-    insights = (
-        await db.execute(
-            select(Journal)
-            .where(
-                Journal.source_kind == "insight",
-                Journal.superseded_by_id.is_(None),
-                Journal.created_at >= cutoff,
-            )
-            .order_by(Journal.created_at.desc())
-            .limit(INSIGHT_LIMIT)
-        )
-    ).scalars().all()
+    insights = await journal_repo.recent_insights(
+        db, cutoff=cutoff, limit=INSIGHT_LIMIT,
+    )
     insight_view = [
         {
             "id": j.id,

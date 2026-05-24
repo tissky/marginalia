@@ -27,9 +27,6 @@ import os
 import sys
 from typing import Literal
 
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
 
 _VALID = ("local", "mirror")
 
@@ -82,7 +79,7 @@ async def _run_migrate(
 ) -> int:
     from marginalia.config import get_settings
     from marginalia.db.engine import get_session_factory
-    from marginalia.db.models import File, FileEntry
+    from marginalia.repositories import files as files_repo
     from marginalia.storage.local import LocalStorage
     from marginalia.storage.mirror import MirrorStorage
 
@@ -111,13 +108,7 @@ async def _run_migrate(
     failed = 0
 
     async with factory() as session:
-        rows = (
-            await session.execute(
-                select(File.id, File.storage_key, File.sha256)
-                .where(File.deleted_at.is_(None))
-                .order_by(File.created_at.asc())
-            )
-        ).all()
+        rows = await files_repo.list_live_storage_keys(session)
 
     print(f"[migrate] {len(rows)} files to consider ({src} → {dst})")
     for file_id, storage_key, sha256 in rows:
@@ -166,21 +157,13 @@ async def _migrate_one(
     dst_kind: str,
     dry_run: bool,
 ) -> str:
-    from marginalia.db.models import File, FileEntry
+    from marginalia.repositories import entries as entries_repo
+    from marginalia.repositories import files as files_repo
 
     # Pick a reasonable display_name + folder_path hint for the mirror
     # side from the FIRST live file_entry pointing at this file.
     async with session_factory() as session:
-        entry = (
-            await session.execute(
-                select(FileEntry)
-                .where(
-                    FileEntry.file_id == file_id,
-                    FileEntry.deleted_at.is_(None),
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+        entry = await entries_repo.find_first_live_for_file(session, file_id)
         display_name = entry.display_name if entry else None
         folder_id = entry.folder_id if entry else None
         folder_path: str | None = None
@@ -226,10 +209,8 @@ async def _migrate_one(
 
     # Update db
     async with session_factory() as session:
-        await session.execute(
-            update(File)
-            .where(File.id == file_id)
-            .values(storage_key=result_key)
+        await files_repo.update_storage_key(
+            session, file_id=file_id, storage_key=result_key,
         )
         await session.commit()
 

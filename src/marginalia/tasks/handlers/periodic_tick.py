@@ -22,11 +22,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import func, select
-
-from marginalia.db.models import AuditEvent, Conversation, Journal, TaskOutcome
-from marginalia.db.models.tasks import Task
+from marginalia.db.models import AuditEvent
 from marginalia.db.session import session_scope
+from marginalia.repositories import journal as journal_repo
+from marginalia.repositories import task_outcomes as task_outcomes_repo
+from marginalia.repositories import tasks as tasks_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -71,26 +71,13 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
         skipped_inflight: list[str] = []
 
         for kind, interval in PERIODIC_INTERVALS.items():
-            in_flight = (
-                await session.execute(
-                    select(Task.id).where(
-                        Task.kind == kind,
-                        Task.status.in_(("pending", "running")),
-                    ).limit(1)
-                )
-            ).scalar_one_or_none()
-            if in_flight is not None:
+            if await tasks_repo.has_inflight_for_kind(session, kind):
                 skipped_inflight.append(kind)
                 continue
 
-            last_done_at = _aware((
-                await session.execute(
-                    select(Task.finished_at)
-                    .where(Task.kind == kind, Task.status == "done")
-                    .order_by(Task.finished_at.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none())
+            last_done_at = _aware(
+                await tasks_repo.last_done_at_for_kind(session, kind)
+            )
 
             if last_done_at is not None and (now - last_done_at) < interval:
                 skipped_recent.append(kind)
@@ -159,39 +146,26 @@ async def _dispatch_summarize_sessions(session, now: datetime) -> list[str]:
         filtering to avoid noisy enqueues).
     """
     age_cutoff = now - SUMMARIZE_MIN_AGE
-    rows = (
-        await session.execute(
-            select(
-                Conversation.session_id,
-                func.count(Journal.id),
-                func.max(Journal.created_at),
-            )
-            .join(Journal, Journal.conversation_id == Conversation.id)
-            .where(Journal.source_kind == "reflect_turn")
-            .group_by(Conversation.session_id)
-            .having(func.count(Journal.id) >= SUMMARIZE_MIN_TURNS)
-            .having(func.max(Journal.created_at) <= age_cutoff)
-            .limit(SUMMARIZE_MAX_DISPATCH_PER_TICK * 4)  # over-fetch then filter
-        )
-    ).all()
+    rows = await journal_repo.reflect_per_session_with_max(
+        session,
+        min_count=SUMMARIZE_MIN_TURNS,
+        max_newest=age_cutoff,
+        limit=SUMMARIZE_MAX_DISPATCH_PER_TICK * 4,
+    )
 
     enqueued: list[str] = []
     for sid, _count, _newest in rows:
         if len(enqueued) >= SUMMARIZE_MAX_DISPATCH_PER_TICK:
             break
 
-        last_outcome = _aware((
-            await session.execute(
-                select(TaskOutcome.completed_at)
-                .where(
-                    TaskOutcome.task_kind == KIND_SUMMARIZE_SESSION,
-                    TaskOutcome.object_kind == "session",
-                    TaskOutcome.object_id == sid,
-                )
-                .order_by(TaskOutcome.completed_at.desc())
-                .limit(1)
+        last_outcome = _aware(
+            await task_outcomes_repo.latest_completed_at_for(
+                session,
+                task_kind=KIND_SUMMARIZE_SESSION,
+                object_kind="session",
+                object_id=sid,
             )
-        ).scalar_one_or_none())
+        )
         if last_outcome is not None and (now - last_outcome) < SUMMARIZE_MIN_AGE:
             continue
 
@@ -223,15 +197,7 @@ async def bootstrap_periodic_tick() -> None:
     enqueue one due immediately so the dispatcher kicks in on the next claim.
     """
     async with session_scope() as session:
-        existing = (
-            await session.execute(
-                select(Task.id).where(
-                    Task.kind == KIND_PERIODIC_TICK,
-                    Task.status.in_(("pending", "running")),
-                ).limit(1)
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
+        if await tasks_repo.has_inflight_for_kind(session, KIND_PERIODIC_TICK):
             await session.commit()
             return
         await enqueue(

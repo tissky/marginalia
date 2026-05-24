@@ -35,22 +35,23 @@ from datetime import datetime, timezone
 from itertools import combinations
 from typing import Any, Mapping
 
-from sqlalchemy import select
-
 from marginalia.db.models import (
     AuditEvent,
-    EntryRelation,
-    EntryTag,
-    FileEntry,
-    Tag,
-    TaskOutcome,
     View,
 )
 from marginalia.db.session import session_scope
+from marginalia.llm import (
+    ChatMessage, ChatRequest, TextBlock, get_chat_client,
+)
+from marginalia.repositories import entry_relations as relations_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
+from marginalia.repositories import tags as tags_repo
+from marginalia.repositories import views as views_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
     record_outcome,
+    select_object_ids,
 )
 from marginalia.tasks.kinds import KIND_PROPOSE_VIEWS, task_handler
 from marginalia.utils.ids import new_id
@@ -292,26 +293,13 @@ async def _build_candidate_clusters(
     """Find tag combinations that ≥ min_entries entries share."""
     async with session_scope() as session:
         # entry → tag_ids (active live entries only)
-        rows = (
-            await session.execute(
-                select(FileEntry.id, EntryTag.tag_id)
-                .join(EntryTag, EntryTag.entry_id == FileEntry.id)
-                .where(
-                    FileEntry.deleted_at.is_(None),
-                    FileEntry.lifecycle.in_(("active", "manual_active")),
-                )
-            )
-        ).all()
+        rows = await entry_tags_repo.list_live_active_entry_tag_pairs(session)
         entry_tags: dict[str, set[str]] = {}
         for eid, tid in rows:
             entry_tags.setdefault(eid, set()).add(tid)
 
         # Tag id → name (canonical only — alias_of is null)
-        tag_rows = (
-            await session.execute(
-                select(Tag.id, Tag.name).where(Tag.alias_of.is_(None))
-            )
-        ).all()
+        tag_rows = await tags_repo.list_canonical_id_name(session)
         tag_name_by_id: dict[str, str] = dict(tag_rows)
         canonical_tag_ids = set(tag_name_by_id)
 
@@ -321,7 +309,7 @@ async def _build_candidate_clusters(
 
         # Existing views' tag_all sets — for "already covered" exclusion
         existing_view_tag_sets: list[frozenset[str]] = []
-        view_rows = (await session.execute(select(View))).scalars().all()
+        view_rows = await views_repo.list_all(session)
         for v in view_rows:
             spec = v.filter_spec or {}
             existing_view_tag_sets.append(
@@ -329,13 +317,10 @@ async def _build_candidate_clusters(
             )
 
         # Already-evaluated cluster ids
-        evaluated_ids: set[str] = set(
-            (await session.execute(
-                select(TaskOutcome.object_id).where(
-                    TaskOutcome.task_kind == KIND_PROPOSE_VIEWS,
-                    TaskOutcome.object_kind == "view_proposal",
-                )
-            )).scalars().all()
+        evaluated_ids = await select_object_ids(
+            session,
+            task_kind=KIND_PROPOSE_VIEWS,
+            object_kind="view_proposal",
         )
 
         # Generate cluster candidates: for each tag, find which entries
@@ -437,14 +422,7 @@ async def _build_relation_clusters(
     intersection of tags across the component's members; the LLM
     then accepts/rejects and renames as usual.
     """
-    rows = (
-        await session.execute(
-            select(
-                EntryRelation.entry_a_id,
-                EntryRelation.entry_b_id,
-            ).where(EntryRelation.vetted.is_(True))
-        )
-    ).all()
+    rows = await relations_repo.list_vetted_pair_keys(session)
     if not rows:
         return []
 
@@ -556,11 +534,3 @@ async def _ask_llm_for_decisions(
         log.warning("propose_views: LLM did not return parseable JSON")
         return []
     return list(resp.parsed_json.get("decisions") or [])
-
-
-# Imports placed after function defs because handlers/__init__ imports
-# this module at startup; ordering matters less now but keeping the
-# convention from sibling handlers.
-from marginalia.llm import (  # noqa: E402
-    ChatMessage, ChatRequest, TextBlock, get_chat_client,
-)

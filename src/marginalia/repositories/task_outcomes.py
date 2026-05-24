@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import TaskOutcome
@@ -73,6 +73,26 @@ async def has_outcome(
     return (await session.execute(stmt.limit(1))).scalar_one_or_none() is not None
 
 
+async def select_object_ids(
+    session: AsyncSession,
+    *,
+    task_kind: str,
+    object_kind: str,
+) -> set[str]:
+    """Every object_id this task ever recorded for this object_kind, ignoring
+    age. Used by mine_corpus_evidence to skip pairs that have ever been
+    LLM-judged."""
+    rows = (
+        await session.execute(
+            select(TaskOutcome.object_id.distinct()).where(
+                TaskOutcome.task_kind == task_kind,
+                TaskOutcome.object_kind == object_kind,
+            )
+        )
+    ).scalars().all()
+    return set(rows)
+
+
 async def select_recent_object_ids(
     session: AsyncSession,
     *,
@@ -92,3 +112,61 @@ async def select_recent_object_ids(
         )
     ).scalars().all()
     return set(rows)
+
+
+async def oldest_completed_at(db: AsyncSession) -> datetime | None:
+    """Used by prune for the "oldest_before" stat."""
+    return (
+        await db.execute(select(func.min(TaskOutcome.completed_at)))
+    ).scalar_one_or_none()
+
+
+async def delete_before(db: AsyncSession, cutoff: datetime) -> int:
+    """Delete every outcome row strictly older than `cutoff`. Returns row
+    count. Used by the prune handler — this is the only legal delete path
+    on this table."""
+    return (
+        await db.execute(
+            delete(TaskOutcome).where(TaskOutcome.completed_at < cutoff)
+        )
+    ).rowcount or 0
+
+
+async def find_one_by_key(
+    db: AsyncSession,
+    *,
+    task_kind: str,
+    object_kind: str,
+    object_id: str,
+) -> TaskOutcome | None:
+    """Single TaskOutcome row matching the composite key. Used by
+    /tend/{run_id} to look up the dispatch row written when the run started."""
+    return (
+        await db.execute(
+            select(TaskOutcome).where(
+                TaskOutcome.task_kind == task_kind,
+                TaskOutcome.object_kind == object_kind,
+                TaskOutcome.object_id == object_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def latest_completed_at_for(
+    db: AsyncSession,
+    *,
+    task_kind: str,
+    object_kind: str,
+    object_id: str,
+) -> datetime | None:
+    """Most-recent completed_at for the given (kind, object) tuple, or None
+    if it has never run. Used by periodic_tick to decide cadence."""
+    return (
+        await db.execute(
+            select(func.max(TaskOutcome.completed_at)).where(
+                TaskOutcome.task_kind == task_kind,
+                TaskOutcome.object_kind == object_kind,
+                TaskOutcome.object_id == object_id,
+            )
+        )
+    ).scalar_one_or_none()

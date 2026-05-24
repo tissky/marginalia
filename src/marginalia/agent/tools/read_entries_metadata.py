@@ -10,19 +10,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import (
-    Catalog,
-    EntryRelation,
-    EntryTag,
-    File,
-    FileEntry,
-    Folder,
-    Tag,
-)
+from marginalia.db.models import Catalog, Folder
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_relations as relations_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -66,24 +60,14 @@ async def read_entries_metadata(
     if not entry_ids:
         return {"entries": [], "count": 0}
 
-    rows = (
-        await db.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(FileEntry.id.in_(entry_ids))
-        )
-    ).all()
+    rows = await entries_repo.list_with_file_by_ids_any(db, entry_ids)
 
     out: list[dict[str, Any]] = []
     for entry, file_row in rows:
         # tags
-        tag_rows = (
-            await db.execute(
-                select(Tag.id, Tag.name, Tag.facet, EntryTag.source)
-                .join(EntryTag, Tag.id == EntryTag.tag_id)
-                .where(EntryTag.entry_id == entry.id)
-            )
-        ).all()
+        tag_rows = await entry_tags_repo.list_tags_with_source_for_entry(
+            db, entry.id,
+        )
 
         # catalog path
         catalog_path: list[dict[str, Any]] = []
@@ -110,20 +94,9 @@ async def read_entries_metadata(
         # related_entries
         related: list[dict[str, Any]] = []
         if related_limit:
-            rel_rows = (
-                await db.execute(
-                    select(EntryRelation)
-                    .where(or_(
-                        EntryRelation.entry_a_id == entry.id,
-                        EntryRelation.entry_b_id == entry.id,
-                    ))
-                    .order_by(
-                        EntryRelation.observation_count.desc(),
-                        EntryRelation.last_observed_at.desc(),
-                    )
-                    .limit(related_limit)
-                )
-            ).scalars().all()
+            rel_rows = await relations_repo.list_top_for_entry(
+                db, entry.id, limit=related_limit,
+            )
             for r in rel_rows:
                 other_id = r.entry_b_id if r.entry_a_id == entry.id else r.entry_a_id
                 related.append({

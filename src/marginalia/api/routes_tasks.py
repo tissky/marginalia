@@ -11,11 +11,10 @@ directly from the DB.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import Task
 from marginalia.db.session import get_session
+from marginalia.repositories import tasks as tasks_repo
 
 router = APIRouter(tags=["tasks"])
 
@@ -31,15 +30,4 @@ async def running_count(
     cares about everything still on the queue, not just the in-flight
     rows.
     """
-    rows = (
-        await db.execute(
-            select(Task.status, func.count(Task.id))
-            .where(Task.status.in_(("running", "pending")))
-            .group_by(Task.status)
-        )
-    ).all()
-    counts = {row[0]: row[1] for row in rows}
-    return {
-        "running": int(counts.get("running", 0)),
-        "pending": int(counts.get("pending", 0)),
-    }
+    return await tasks_repo.count_running_and_pending(db)

@@ -38,12 +38,11 @@ import logging
 import math
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
-from sqlalchemy import select
-
-from marginalia.db.models import EntryTag, FileEntry
 from marginalia.db.session import session_scope
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -82,13 +81,7 @@ async def handle_mine_tag_overlap(payload: Mapping[str, Any]) -> None:
 
     async with session_scope() as session:
         # 1. Pull all (entry, tag) edges where entry is live.
-        rows = (
-            await session.execute(
-                select(EntryTag.entry_id, EntryTag.tag_id)
-                .join(FileEntry, FileEntry.id == EntryTag.entry_id)
-                .where(FileEntry.deleted_at.is_(None))
-            )
-        ).all()
+        rows = await entry_tags_repo.list_live_entry_tag_pairs(session)
 
         entry_tags: dict[str, set[str]] = defaultdict(set)
         tag_entries: dict[str, set[str]] = defaultdict(set)
@@ -135,7 +128,10 @@ async def handle_mine_tag_overlap(payload: Mapping[str, Any]) -> None:
         for a, b, _, _ in scored:
             all_ids.add(a)
             all_ids.add(b)
-        live_ids = await _live_entry_ids(session, all_ids) if all_ids else set()
+        live_ids = (
+            set(await entries_repo.filter_live_ids(session, list(all_ids)))
+            if all_ids else set()
+        )
 
         for a, b, jaccard, shared_count in scored:
             if new_relations >= cap:
@@ -195,15 +191,3 @@ async def handle_mine_tag_overlap(payload: Mapping[str, Any]) -> None:
         candidates_considered, pairs_above_threshold,
         new_relations, incremented,
     )
-
-
-async def _live_entry_ids(session, ids: Iterable[str]) -> set[str]:
-    rows = (
-        await session.execute(
-            select(FileEntry.id).where(
-                FileEntry.id.in_(list(ids)),
-                FileEntry.deleted_at.is_(None),
-            )
-        )
-    ).scalars().all()
-    return set(rows)

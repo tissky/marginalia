@@ -30,10 +30,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import delete, select
-
-from marginalia.db.models import AuditEvent, File, FileEntry
+from marginalia.db.models import AuditEvent
 from marginalia.db.session import session_scope
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import files as files_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -60,22 +60,12 @@ async def handle_purge_deleted_files(payload: Mapping[str, Any]) -> None:
     files_purged = 0
 
     async with session_scope() as session:
-        due_entries = (
-            await session.execute(
-                select(FileEntry).where(
-                    FileEntry.deleted_at.isnot(None),
-                    FileEntry.purge_after.isnot(None),
-                    FileEntry.purge_after < now,
-                )
-            )
-        ).scalars().all()
+        due_entries = await entries_repo.list_purge_due(session, now)
 
         for entry in due_entries:
             entry_id = entry.id
             file_id = entry.file_id
-            await session.execute(
-                delete(FileEntry).where(FileEntry.id == entry_id)
-            )
+            await entries_repo.hard_delete_by_id(session, entry_id)
             await AuditEvent.append(
                 session,
                 kind="entry_purged",
@@ -90,26 +80,16 @@ async def handle_purge_deleted_files(payload: Mapping[str, Any]) -> None:
             )
             entries_purged += 1
 
-            still_live = (
-                await session.execute(
-                    select(FileEntry.id).where(
-                        FileEntry.file_id == file_id,
-                        FileEntry.deleted_at.is_(None),
-                    ).limit(1)
-                )
-            ).scalar_one_or_none()
-            still_any = (
-                await session.execute(
-                    select(FileEntry.id).where(FileEntry.file_id == file_id).limit(1)
-                )
-            ).scalar_one_or_none()
+            still_live = await entries_repo.has_live_entry_for_file(session, file_id)
+            still_any = await entries_repo.has_any_entry_for_file(session, file_id)
 
-            if still_live is None and still_any is None:
+            if not still_live and not still_any:
+                from marginalia.db.models import File
                 file_row = await session.get(File, file_id)
                 if file_row is None:
                     continue
                 storage_key = file_row.storage_key
-                await session.execute(delete(File).where(File.id == file_id))
+                await files_repo.hard_delete_by_id(session, file_id)
                 await AuditEvent.append(
                     session,
                     kind="file_purged",

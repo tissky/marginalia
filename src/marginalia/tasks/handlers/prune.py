@@ -22,10 +22,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import delete, func, select
-
-from marginalia.db.models import AuditEvent, TaskOutcome
+from marginalia.db.models import AuditEvent
 from marginalia.db.session import session_scope
+from marginalia.repositories import audit_events as audit_repo
+from marginalia.repositories import task_outcomes as task_outcomes_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -93,14 +93,8 @@ async def handle_prune(payload: Mapping[str, Any]) -> None:
 
 
 async def _prune_audit_events(session, cutoff: datetime) -> tuple[int, datetime | None]:
-    oldest = (
-        await session.execute(select(func.min(AuditEvent.occurred_at)))
-    ).scalar_one_or_none()
-    deleted = (
-        await session.execute(
-            delete(AuditEvent).where(AuditEvent.occurred_at < cutoff)
-        )
-    ).rowcount or 0
+    oldest = await audit_repo.oldest_occurred_at(session)
+    deleted = await audit_repo.delete_before(session, cutoff)
     if deleted:
         await AuditEvent.append(
             session,
@@ -111,12 +105,6 @@ async def _prune_audit_events(session, cutoff: datetime) -> tuple[int, datetime 
 
 
 async def _prune_task_outcomes(session, cutoff: datetime) -> tuple[int, datetime | None]:
-    oldest = (
-        await session.execute(select(func.min(TaskOutcome.completed_at)))
-    ).scalar_one_or_none()
-    deleted = (
-        await session.execute(
-            delete(TaskOutcome).where(TaskOutcome.completed_at < cutoff)
-        )
-    ).rowcount or 0
+    oldest = await task_outcomes_repo.oldest_completed_at(session)
+    deleted = await task_outcomes_repo.delete_before(session, cutoff)
     return deleted, oldest

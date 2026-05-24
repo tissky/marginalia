@@ -48,19 +48,12 @@ async def _check_storage_consistency(settings) -> None:
     Raises StorageBackendMismatchError on conflict; the error message
     points the user at `marginalia storage migrate`.
     """
-    from sqlalchemy import select
     from marginalia.db.engine import get_session_factory
-    from marginalia.db.models import File
+    from marginalia.repositories import files as files_repo
 
     factory = get_session_factory()
     async with factory() as s:
-        sample = (
-            await s.execute(
-                select(File.storage_key)
-                .where(File.deleted_at.is_(None))
-                .limit(5)
-            )
-        ).scalars().all()
+        sample = await files_repo.sample_live_storage_keys(s, limit=5)
     if not sample:
         return  # empty db, nothing to check
 

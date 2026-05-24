@@ -1,0 +1,297 @@
+"""tasks repository — pure SA queries against the Task table.
+
+Caller owns the transaction.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Sequence
+
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from marginalia.db.models.tasks import Task
+
+
+async def find_pending_or_running_by_dedup(
+    db: AsyncSession, dedup_key: str,
+) -> Task | None:
+    """Used by enqueue's dedup short-circuit."""
+    return (
+        await db.execute(
+            select(Task).where(
+                Task.dedup_key == dedup_key,
+                Task.status.in_(("pending", "running")),
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def claim_pending_ids(
+    db: AsyncSession,
+    *,
+    now: datetime,
+    limit: int,
+    use_skip_locked: bool,
+) -> list[str]:
+    """Pick the next pending task ids, ordered by `(priority, scheduled_at)`.
+    The caller turns these into `running`. On postgres pass
+    `use_skip_locked=True`; SQLite has no FOR UPDATE."""
+    stmt = (
+        select(Task.id)
+        .where(Task.status == "pending", Task.scheduled_at <= now)
+        .order_by(Task.priority.asc(), Task.scheduled_at.asc())
+        .limit(limit)
+    )
+    if use_skip_locked:
+        stmt = stmt.with_for_update(skip_locked=True)
+    rows = (await db.execute(stmt)).scalars().all()
+    return list(rows)
+
+
+async def mark_running(
+    db: AsyncSession,
+    *,
+    ids: Sequence[str],
+    now: datetime,
+    lease_until: datetime,
+    worker_id: str,
+) -> None:
+    """Bulk-transition the given pending ids to running, bumping attempts."""
+    if not ids:
+        return
+    await db.execute(
+        update(Task)
+        .where(Task.id.in_(list(ids)), Task.status == "pending")
+        .values(
+            status="running",
+            locked_by=worker_id,
+            lease_expires_at=lease_until,
+            started_at=now,
+            attempts=Task.attempts + 1,
+        )
+    )
+
+
+async def mark_done(
+    db: AsyncSession, *, task_id: str, now: datetime,
+) -> None:
+    await db.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(
+            status="done",
+            finished_at=now,
+            last_error=None,
+            lease_expires_at=None,
+            locked_by=None,
+        )
+    )
+
+
+async def mark_dead(
+    db: AsyncSession, *, task_id: str, now: datetime, error: str,
+) -> None:
+    await db.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(
+            status="dead",
+            last_error=error,
+            finished_at=now,
+            lease_expires_at=None,
+            locked_by=None,
+        )
+    )
+
+
+async def reschedule_for_retry(
+    db: AsyncSession,
+    *,
+    task_id: str,
+    error: str,
+    next_run_at: datetime,
+) -> None:
+    await db.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(
+            status="pending",
+            last_error=error,
+            scheduled_at=next_run_at,
+            lease_expires_at=None,
+            locked_by=None,
+        )
+    )
+
+
+async def heartbeat(
+    db: AsyncSession, *, task_id: str, lease_until: datetime,
+) -> None:
+    await db.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.status == "running")
+        .values(lease_expires_at=lease_until)
+    )
+
+
+async def list_stale_running_ids(
+    db: AsyncSession, *, now: datetime, limit: int,
+) -> list[str]:
+    """Running rows whose lease has expired — the worker that owned them
+    likely crashed. Used by recover_stuck_tasks."""
+    rows = (
+        await db.execute(
+            select(Task.id)
+            .where(
+                Task.status == "running",
+                Task.lease_expires_at.isnot(None),
+                Task.lease_expires_at < now,
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def list_stale_running(
+    db: AsyncSession, *, now: datetime,
+) -> list[Task]:
+    """Full Task rows for stale-running ids — recover_stuck_tasks needs the
+    attempt counts and previous lease/locked_by to write an audit event."""
+    rows = (
+        await db.execute(
+            select(Task).where(
+                Task.status == "running",
+                Task.lease_expires_at.isnot(None),
+                Task.lease_expires_at < now,
+            )
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def revive_running_to_pending(
+    db: AsyncSession, *, task_id: str, now: datetime,
+) -> None:
+    """Restore a stale-running row to pending so the worker pool can reclaim
+    it. Used by recover_stuck_tasks."""
+    await db.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.status == "running")
+        .values(
+            status="pending",
+            locked_by=None,
+            lease_expires_at=None,
+            scheduled_at=now,
+        )
+    )
+
+
+async def mark_running_dead(
+    db: AsyncSession, *, task_id: str, now: datetime, error: str,
+) -> None:
+    """Status='running' guarded mark_dead — used by recover_stuck_tasks
+    when retries are exhausted."""
+    await db.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.status == "running")
+        .values(
+            status="dead",
+            last_error=error,
+            finished_at=now,
+            locked_by=None,
+            lease_expires_at=None,
+        )
+    )
+
+
+async def has_inflight_for_kind(db: AsyncSession, kind: str) -> bool:
+    """True if there is at least one pending/running row for `kind`. Used
+    by periodic_tick to suppress duplicate dispatch."""
+    row = (
+        await db.execute(
+            select(Task.id).where(
+                Task.kind == kind,
+                Task.status.in_(("pending", "running")),
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
+async def last_done_at_for_kind(
+    db: AsyncSession, kind: str,
+) -> datetime | None:
+    """`finished_at` of the most-recent done row for `kind`, or None.
+    Used by periodic_tick to enforce per-kind cadence."""
+    return (
+        await db.execute(
+            select(Task.finished_at)
+            .where(Task.kind == kind, Task.status == "done")
+            .order_by(Task.finished_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def get(db: AsyncSession, task_id: str) -> Task | None:
+    return await db.get(Task, task_id)
+
+
+async def count_by_status(db: AsyncSession) -> dict[str, int]:
+    """Counts grouped by status. Used by /admin/tasks summaries."""
+    rows = (
+        await db.execute(
+            select(Task.status, func.count()).group_by(Task.status)
+        )
+    ).all()
+    return {s: c for s, c in rows}
+
+
+async def count_running_and_pending(db: AsyncSession) -> dict[str, int]:
+    """Two-row count of {running, pending}. Used by /tasks/running-count."""
+    rows = (
+        await db.execute(
+            select(Task.status, func.count(Task.id))
+            .where(Task.status.in_(("running", "pending")))
+            .group_by(Task.status)
+        )
+    ).all()
+    counts = {s: int(c) for s, c in rows}
+    return {
+        "running": counts.get("running", 0),
+        "pending": counts.get("pending", 0),
+    }
+
+
+async def list_by_ids(db: AsyncSession, ids: list[str]) -> list[Task]:
+    """Task rows whose id is in `ids`. Used by /tend/{run_id} to join the
+    dispatch row's recorded task ids back to live state."""
+    if not ids:
+        return []
+    rows = (
+        await db.execute(select(Task).where(Task.id.in_(ids)))
+    ).scalars().all()
+    return list(rows)
+
+
+async def list_by_status(
+    db: AsyncSession,
+    *,
+    status: str,
+    limit: int,
+    offset: int = 0,
+) -> list[Task]:
+    """Paginated rows for one status, newest scheduled first. Used by the
+    /admin/tasks listing."""
+    rows = (
+        await db.execute(
+            select(Task)
+            .where(Task.status == status)
+            .order_by(Task.scheduled_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return list(rows)

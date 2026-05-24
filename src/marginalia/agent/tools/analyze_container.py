@@ -26,12 +26,11 @@ import logging
 import re
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import File, FileEntry
 from marginalia.pipelines.archive import _is_listable
+from marginalia.repositories import entries as entries_repo
 from marginalia.storage import get_storage, open_archive
 
 log = logging.getLogger(__name__)
@@ -109,17 +108,7 @@ async def analyze_container(
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
     container_id = args["container_entry_id"]
-    pair = (
-        await db.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.id == container_id,
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
-        )
-    ).first()
+    pair = await entries_repo.get_live_with_file(db, container_id)
     if pair is None:
         return {"error": "container entry not found", "entry_id": container_id}
     entry, file_row = pair

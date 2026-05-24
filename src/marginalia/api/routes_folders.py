@@ -6,10 +6,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from marginalia.db.models import FileEntry
 from marginalia.db.session import get_session
+from marginalia.repositories import entries as entries_repo
 from marginalia.services import folders as folder_service
 
 router = APIRouter(prefix="/folders", tags=["folders"])
@@ -66,13 +66,7 @@ async def get_folder(
     if folder is None:
         raise HTTPException(status_code=404, detail="folder not found")
     children = await folder_service.list_child_folders(session, folder.id)
-    entries = (
-        await session.execute(
-            select(FileEntry)
-            .where(FileEntry.folder_id == folder.id, FileEntry.deleted_at.is_(None))
-            .order_by(FileEntry.display_name)
-        )
-    ).scalars().all()
+    entries = await entries_repo.list_live_in_folder(session, folder.id)
     return {
         **_serialize_folder(folder),
         "children": [_serialize_folder(c) for c in children],

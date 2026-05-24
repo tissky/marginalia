@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models.tasks import Task
+from marginalia.repositories import tasks as tasks_repo
 from marginalia.tasks.kinds import DEFAULT_PRIORITIES
 from marginalia.utils.ids import new_id
 
@@ -25,14 +25,9 @@ async def enqueue(
     skip insertion and return the existing task (or None if it cannot be reused)."""
     now = datetime.now(timezone.utc)
     if dedup_key is not None:
-        existing = (
-            await session.execute(
-                select(Task).where(
-                    Task.dedup_key == dedup_key,
-                    Task.status.in_(("pending", "running")),
-                )
-            )
-        ).scalar_one_or_none()
+        existing = await tasks_repo.find_pending_or_running_by_dedup(
+            session, dedup_key,
+        )
         if existing is not None:
             return existing
 

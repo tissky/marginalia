@@ -27,10 +27,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select, update
-
-from marginalia.db.models import AuditEvent, FileEntry, Journal
+from marginalia.db.models import AuditEvent
 from marginalia.db.session import session_scope
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import journal as journal_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -139,14 +139,10 @@ async def _run_archive(
 
 
 async def _recent_entry_ids(session, cutoff: datetime) -> set[str]:
-    rows = (
-        await session.execute(
-            select(Journal.entry_ids).where(Journal.created_at >= cutoff)
-        )
-    ).scalars().all()
+    arrays = await journal_repo.list_entry_id_arrays_since(session, cutoff)
     out: set[str] = set()
-    for row in rows:
-        for eid in (row or []):
+    for row in arrays:
+        for eid in row:
             if isinstance(eid, str):
                 out.add(eid)
     return out
@@ -157,17 +153,9 @@ async def _select_demotion_candidates(
 ) -> list[_Decision]:
     async with session_scope() as session:
         recent = await _recent_entry_ids(session, cutoff_recent_journal)
-        rows = (
-            await session.execute(
-                select(FileEntry.id, FileEntry.created_at)
-                .where(
-                    FileEntry.lifecycle == "active",
-                    FileEntry.deleted_at.is_(None),
-                    FileEntry.created_at <= cutoff_age,
-                )
-                .order_by(FileEntry.created_at.asc())
-            )
-        ).all()
+        rows = await entries_repo.list_active_for_demotion(
+            session, cutoff_age=cutoff_age,
+        )
         decisions: list[_Decision] = []
         for entry_id, _created_at in rows:
             if entry_id in recent:
@@ -188,17 +176,9 @@ async def _select_archival_candidates(
 ) -> list[_Decision]:
     async with session_scope() as session:
         recent = await _recent_entry_ids(session, cutoff_recent_journal)
-        rows = (
-            await session.execute(
-                select(FileEntry.id, FileEntry.updated_at)
-                .where(
-                    FileEntry.lifecycle == "demoted",
-                    FileEntry.deleted_at.is_(None),
-                    FileEntry.updated_at <= cutoff_demoted,
-                )
-                .order_by(FileEntry.updated_at.asc())
-            )
-        ).all()
+        rows = await entries_repo.list_demoted_for_archive(
+            session, cutoff_demoted=cutoff_demoted,
+        )
         decisions: list[_Decision] = []
         for entry_id, _updated_at in rows:
             if entry_id in recent:
@@ -224,16 +204,14 @@ async def _apply_decisions(
     applied = 0
     async with session_scope() as session:
         for d in decisions:
-            result = await session.execute(
-                update(FileEntry)
-                .where(
-                    FileEntry.id == d.entry_id,
-                    FileEntry.lifecycle == d.old_lifecycle,
-                    FileEntry.deleted_at.is_(None),
-                )
-                .values(lifecycle=d.new_lifecycle, updated_at=now)
+            rc = await entries_repo.transition_lifecycle(
+                session,
+                entry_id=d.entry_id,
+                from_lifecycle=d.old_lifecycle,
+                to_lifecycle=d.new_lifecycle,
+                now=now,
             )
-            if not result.rowcount:
+            if not rc:
                 await record_outcome(
                     session,
                     task_kind=outcome_task_kind,

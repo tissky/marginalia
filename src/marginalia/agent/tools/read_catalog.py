@@ -7,11 +7,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import Catalog, FileEntry
+from marginalia.repositories import catalogs as catalogs_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -46,29 +45,14 @@ async def read_catalog(
 ) -> dict[str, Any]:
     cat_id = args["id"]
     entries_limit = min(int(args.get("entries_limit") or 20), 100)
-    cat = await db.get(Catalog, cat_id)
-    if cat is None or cat.deleted_at is not None:
+    cat = await catalogs_repo.get_live(db, cat_id)
+    if cat is None:
         return {"error": "catalog not found or deleted", "id": cat_id}
 
-    children = (
-        await db.execute(
-            select(Catalog)
-            .where(Catalog.parent_id == cat_id, Catalog.deleted_at.is_(None))
-            .order_by(Catalog.name)
-        )
-    ).scalars().all()
-
-    entries = (
-        await db.execute(
-            select(FileEntry)
-            .where(
-                FileEntry.catalog_id == cat_id,
-                FileEntry.deleted_at.is_(None),
-            )
-            .order_by(FileEntry.updated_at.desc())
-            .limit(entries_limit)
-        )
-    ).scalars().all()
+    children = await catalogs_repo.list_live_children(db, cat_id)
+    entries = await catalogs_repo.list_live_direct_entries(
+        db, cat_id, limit=entries_limit,
+    )
 
     return {
         "id": cat.id,

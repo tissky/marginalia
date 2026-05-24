@@ -44,14 +44,15 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping
 
-from sqlalchemy import func, select, update
-
-from marginalia.db.models import Catalog, FileEntry, Journal, Tag
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.repositories import catalogs as catalogs_repo
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
+from marginalia.repositories import journal as journal_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -154,26 +155,12 @@ async def handle_restructure_catalogs(payload: Mapping[str, Any]) -> None:
 # ----- snapshot --------------------------------------------------------------
 
 async def _take_snapshot(*, now: datetime) -> dict[str, Any]:
-    journal_cutoff = now - __import__("datetime").timedelta(days=JOURNAL_HINT_DAYS)
+    journal_cutoff = now - timedelta(days=JOURNAL_HINT_DAYS)
     async with session_scope() as session:
-        catalogs = (
-            await session.execute(
-                select(Catalog).where(Catalog.deleted_at.is_(None)).order_by(Catalog.created_at)
-            )
-        ).scalars().all()
+        catalogs = await catalogs_repo.list_all_live(session)
 
         # doc_count per catalog from file_entries (live entries only)
-        counts_rows = (
-            await session.execute(
-                select(FileEntry.catalog_id, func.count())
-                .where(
-                    FileEntry.catalog_id.isnot(None),
-                    FileEntry.deleted_at.is_(None),
-                )
-                .group_by(FileEntry.catalog_id)
-            )
-        ).all()
-        counts = {cid: c for cid, c in counts_rows}
+        counts = await catalogs_repo.direct_entry_counts(session)
 
         catalog_view = [
             {
@@ -189,14 +176,9 @@ async def _take_snapshot(*, now: datetime) -> dict[str, Any]:
             for c in catalogs
         ]
 
-        hints = (
-            await session.execute(
-                select(Journal.note, Journal.entry_ids, Journal.tags, Journal.created_at)
-                .where(Journal.created_at >= journal_cutoff)
-                .order_by(Journal.created_at.desc())
-                .limit(40)
-            )
-        ).all()
+        hints = await journal_repo.list_recent_with_hints(
+            session, cutoff=journal_cutoff, limit=40,
+        )
         hint_view = [
             {"note": n, "entry_ids": list(e or []), "tags": list(t or []),
              "created_at": ca.isoformat()}
@@ -206,35 +188,28 @@ async def _take_snapshot(*, now: datetime) -> dict[str, Any]:
 
         # high-activity entries: most recently updated active entries
         # (cheap proxy — restructure does not need a full query stack here)
-        active_entries = (
-            await session.execute(
-                select(FileEntry)
-                .where(
-                    FileEntry.lifecycle.in_(("active", "manual_active")),
-                    FileEntry.deleted_at.is_(None),
-                )
-                .order_by(FileEntry.updated_at.desc())
-                .limit(HIGH_ACTIVITY_TOP_N)
-            )
-        ).scalars().all()
+        active_entries = await entries_repo.list_active_recent_updated(
+            session, limit=HIGH_ACTIVITY_TOP_N,
+        )
 
         entry_view = []
-        for e in active_entries:
-            tag_rows = (
-                await session.execute(
-                    select(Tag.name, Tag.facet)
-                    .join_from(Tag, __import__("marginalia.db.models", fromlist=["EntryTag"]).EntryTag,
-                               Tag.id == __import__("marginalia.db.models", fromlist=["EntryTag"]).EntryTag.tag_id)
-                    .where(__import__("marginalia.db.models", fromlist=["EntryTag"]).EntryTag.entry_id == e.id)
+        if active_entries:
+            tag_rows = await entry_tags_repo.list_id_name_facet_for_entries(
+                session, [e.id for e in active_entries],
+            )
+            tags_by_entry: dict[str, list[dict[str, Any]]] = {}
+            for eid, _tid, name, facet in tag_rows:
+                tags_by_entry.setdefault(eid, []).append(
+                    {"name": name, "facet": facet}
                 )
-            ).all()
-            entry_view.append({
-                "entry_id": e.id,
-                "display_name": e.display_name,
-                "catalog_id": e.catalog_id,
-                "extra": e.extra,
-                "tags": [{"name": n, "facet": f} for n, f in tag_rows],
-            })
+            for e in active_entries:
+                entry_view.append({
+                    "entry_id": e.id,
+                    "display_name": e.display_name,
+                    "catalog_id": e.catalog_id,
+                    "extra": e.extra,
+                    "tags": tags_by_entry.get(e.id, []),
+                })
 
         await session.commit()
 

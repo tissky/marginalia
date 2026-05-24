@@ -36,12 +36,11 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
-from sqlalchemy import select
-
-from marginalia.db.models import Conversation, FileEntry
 from marginalia.db.session import session_scope
+from marginalia.repositories import conversations as conversations_repo
+from marginalia.repositories import entries as entries_repo
 from marginalia.services.exports import parse_citations
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
@@ -76,14 +75,9 @@ async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
     skipped_dead_entry = 0
 
     async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(Conversation.agent_response).where(
-                    Conversation.agent_response.is_not(None),
-                    Conversation.started_at >= cutoff,
-                )
-            )
-        ).scalars().all()
+        rows = await conversations_repo.list_agent_responses_since(
+            session, cutoff,
+        )
         messages_scanned = len(rows)
 
         counter: Counter[tuple[str, str]] = Counter()
@@ -106,7 +100,10 @@ async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
         for (a, b), _ in candidates:
             all_ids.add(a)
             all_ids.add(b)
-        live_ids = await _live_entry_ids(session, all_ids) if all_ids else set()
+        live_ids = (
+            set(await entries_repo.filter_live_ids(session, list(all_ids)))
+            if all_ids else set()
+        )
 
         for (a, b), n in candidates:
             if new_relations >= cap:
@@ -166,15 +163,3 @@ def _extract_entry_ids(agent_response: str | None) -> set[str]:
     if not agent_response:
         return set()
     return {c.entry_id for c in parse_citations(agent_response) if c.entry_id}
-
-
-async def _live_entry_ids(session, ids: Iterable[str]) -> set[str]:
-    rows = (
-        await session.execute(
-            select(FileEntry.id).where(
-                FileEntry.id.in_(list(ids)),
-                FileEntry.deleted_at.is_(None),
-            )
-        )
-    ).scalars().all()
-    return set(rows)

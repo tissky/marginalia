@@ -25,8 +25,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select, update
-
 from marginalia.db.models import (
     AuditEvent,
     Catalog,
@@ -39,6 +37,10 @@ from marginalia.db.models import (
 from marginalia.db.session import session_scope
 from marginalia.pipelines import resolve_pipeline
 from marginalia.pipelines.base import PipelineContext, PipelineResult, TagSuggestion
+from marginalia.repositories import catalogs as catalogs_repo
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
+from marginalia.repositories import tags as tags_repo
 from marginalia.storage import get_storage
 from marginalia.tasks.kinds import KIND_INGEST_FILE, task_handler
 from marginalia.utils.ids import new_id
@@ -71,11 +73,9 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
             await session.commit()
             return
 
-        await session.execute(
-            update(File)
-            .where(File.id == file_id)
-            .values(ingest_status="processing", updated_at=_utcnow())
-        )
+        now = _utcnow()
+        file_row.ingest_status = "processing"
+        file_row.updated_at = now
         await AuditEvent.append(
             session,
             kind="ingest_status_changed",
@@ -92,14 +92,7 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
         # one. (Multiple entries with same file_id can exist via dedup; the
         # other entries get filled later if they're new — see services.upload
         # which already seeds them on dedup.)
-        entry = (
-            await session.execute(
-                select(FileEntry)
-                .where(FileEntry.file_id == file_id, FileEntry.deleted_at.is_(None))
-                .order_by(FileEntry.created_at)
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+        entry = await entries_repo.find_first_live_for_file(session, file_id)
         if entry is None:
             log.warning("file %s has no live entry; aborting ingest", file_id)
             await AuditEvent.append(
@@ -107,9 +100,8 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
                 kind="ingest_status_changed",
                 payload={"file_id": file_id, "status": "failed", "reason": "no_live_entry"},
             )
-            await session.execute(
-                update(File).where(File.id == file_id).values(ingest_status="failed")
-            )
+            file_row.ingest_status = "failed"
+            file_row.updated_at = _utcnow()
             await session.commit()
             return
 
@@ -154,9 +146,10 @@ def _utcnow() -> datetime:
 
 async def _mark_failed(file_id: str, *, reason: str) -> None:
     async with session_scope() as session:
-        await session.execute(
-            update(File).where(File.id == file_id).values(ingest_status="failed", updated_at=_utcnow())
-        )
+        file_row = await session.get(File, file_id)
+        if file_row is not None:
+            file_row.ingest_status = "failed"
+            file_row.updated_at = _utcnow()
         await AuditEvent.append(
             session,
             kind="ingest_status_changed",
@@ -178,39 +171,18 @@ async def _build_context(
     display_name: str | None = None,
 ) -> PipelineContext:
     folder_path = await _resolve_folder_path(session, entry.folder_id)
-    siblings = (
-        await session.execute(
-            select(FileEntry.display_name)
-            .where(
-                FileEntry.folder_id == entry.folder_id,
-                FileEntry.id != entry.id,
-                FileEntry.deleted_at.is_(None),
-            )
-            .order_by(FileEntry.display_name)
-        )
-    ).scalars().all()
+    siblings = await entries_repo.list_sibling_display_names(
+        session, folder_id=entry.folder_id, exclude_entry_id=entry.id,
+    )
 
     # tiny sketches — pipeline can't see the whole catalog/vocab
-    cat_rows = (
-        await session.execute(
-            select(Catalog.id, Catalog.name, Catalog.parent_id)
-            .where(Catalog.deleted_at.is_(None))
-            .limit(CATALOG_SKETCH_LIMIT)
-        )
-    ).all()
+    cat_rows = await catalogs_repo.list_live_sketch(session, limit=CATALOG_SKETCH_LIMIT)
     catalog_sketch = [
-        {"id": r[0], "name": r[1], "parent_id": r[2]} for r in cat_rows
+        {"id": cid, "name": name, "parent_id": pid} for cid, name, pid in cat_rows
     ]
-    tag_rows = (
-        await session.execute(
-            select(Tag.name, Tag.facet, Tag.doc_count)
-            .where(Tag.alias_of.is_(None))
-            .order_by(Tag.doc_count.desc())
-            .limit(TAG_VOCAB_LIMIT)
-        )
-    ).all()
+    tag_rows = await tags_repo.list_canonical_summaries(session, limit=TAG_VOCAB_LIMIT)
     tag_vocabulary = [
-        {"name": r[0], "facet": r[1], "doc_count": r[2]} for r in tag_rows
+        {"name": n, "facet": f, "doc_count": dc} for n, f, dc in tag_rows
     ]
 
     return PipelineContext(
@@ -275,13 +247,9 @@ async def _persist(
     # --- entry tags --------------------------------------------------------
     for sugg in result.entry_tags:
         tag_id = await _resolve_or_create_tag(session, sugg, now)
-        existing = (
-            await session.execute(
-                select(EntryTag).where(
-                    EntryTag.entry_id == entry_id, EntryTag.tag_id == tag_id
-                )
-            )
-        ).scalar_one_or_none()
+        existing = await entry_tags_repo.find_one(
+            session, entry_id=entry_id, tag_id=tag_id,
+        )
         if existing is None:
             session.add(EntryTag(
                 entry_id=entry_id,
@@ -310,15 +278,9 @@ async def _resolve_or_create_catalog_path(session, path: list[str]) -> str | Non
     parent_id: str | None = None
     now = _utcnow()
     for name in path:
-        existing = (
-            await session.execute(
-                select(Catalog).where(
-                    Catalog.parent_id.is_(None) if parent_id is None else Catalog.parent_id == parent_id,
-                    Catalog.name == name,
-                    Catalog.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
+        existing = await catalogs_repo.find_live_child_by_name(
+            session, parent_id=parent_id, name=name,
+        )
         if existing is None:
             existing = Catalog(
                 id=new_id(),
@@ -343,11 +305,9 @@ async def _resolve_or_create_catalog_path(session, path: list[str]) -> str | Non
 
 
 async def _resolve_or_create_tag(session, sugg: TagSuggestion, now: datetime) -> str:
-    existing = (
-        await session.execute(
-            select(Tag).where(Tag.name == sugg.name, Tag.facet == sugg.facet)
-        )
-    ).scalar_one_or_none()
+    existing = await tags_repo.find_canonical_by_name_facet(
+        session, name=sugg.name, facet=sugg.facet,
+    )
     if existing is not None:
         if existing.alias_of:
             return existing.alias_of

@@ -35,21 +35,17 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
-from sqlalchemy import select
-
-from marginalia.db.models import (
-    FileEntry,
-    Journal,
-)
 from marginalia.db.session import session_scope
-from marginalia.tasks.handlers._mining_helpers import upsert_relation_pair
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import journal as journal_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
+from marginalia.tasks.handlers._mining_helpers import upsert_relation_pair
 log = logging.getLogger(__name__)
 
 JOURNAL_WINDOW_DAYS = 30
@@ -77,11 +73,7 @@ async def handle_mine_session_cooccurrence(payload: Mapping[str, Any]) -> None:
     skipped_dead_entry = 0
 
     async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(Journal.entry_ids).where(Journal.created_at >= cutoff)
-            )
-        ).scalars().all()
+        rows = await journal_repo.list_entry_id_arrays_since(session, cutoff)
         journals_scanned = len(rows)
 
         # 2. Count pairs across rows.
@@ -104,7 +96,10 @@ async def handle_mine_session_cooccurrence(payload: Mapping[str, Any]) -> None:
         for (a, b), _ in candidates:
             all_ids.add(a)
             all_ids.add(b)
-        live_ids = await _live_entry_ids(session, all_ids) if all_ids else set()
+        live_ids = (
+            set(await entries_repo.filter_live_ids(session, list(all_ids)))
+            if all_ids else set()
+        )
 
         for pair, n in candidates:
             if new_relations >= cap:
@@ -153,15 +148,3 @@ async def handle_mine_session_cooccurrence(payload: Mapping[str, Any]) -> None:
         "mine_session_cooccurrence: journals=%d candidates=%d new=%d incremented=%d",
         journals_scanned, pairs_above_threshold, new_relations, incremented,
     )
-
-
-async def _live_entry_ids(session, ids: Iterable[str]) -> set[str]:
-    rows = (
-        await session.execute(
-            select(FileEntry.id).where(
-                FileEntry.id.in_(list(ids)),
-                FileEntry.deleted_at.is_(None),
-            )
-        )
-    ).scalars().all()
-    return set(rows)

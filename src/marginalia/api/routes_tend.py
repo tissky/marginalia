@@ -21,12 +21,12 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import AuditEvent, Task
-from marginalia.db.models.task_outcomes import TaskOutcome
 from marginalia.db.session import get_session
+from marginalia.repositories import task_outcomes as task_outcomes_repo
+from marginalia.repositories import tasks as tasks_repo
 from marginalia.repositories.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import (
@@ -69,14 +69,7 @@ async def post_tend(
     run_id = new_id()
     dispatched: list[dict[str, Any]] = []
     for kind in TEND_CHAIN:
-        existing = (
-            await db.execute(
-                select(Task).where(
-                    Task.dedup_key == kind,
-                    Task.status.in_(("pending", "running")),
-                )
-            )
-        ).scalar_one_or_none()
+        existing = await tasks_repo.find_pending_or_running_by_dedup(db, kind)
         if existing is not None:
             dispatched.append({
                 "kind": kind,
@@ -139,15 +132,12 @@ async def get_tend(
     then joins live `tasks` rows to report status/started_at/finished_at and
     any outcomes recorded with task_run_id=run_id.
     """
-    dispatch = (
-        await db.execute(
-            select(TaskOutcome).where(
-                TaskOutcome.task_kind == TEND_DISPATCH_KIND,
-                TaskOutcome.object_kind == TEND_OBJECT_KIND,
-                TaskOutcome.object_id == run_id,
-            )
-        )
-    ).scalar_one_or_none()
+    dispatch = await task_outcomes_repo.find_one_by_key(
+        db,
+        task_kind=TEND_DISPATCH_KIND,
+        object_kind=TEND_OBJECT_KIND,
+        object_id=run_id,
+    )
     if dispatch is None:
         raise HTTPException(status_code=404, detail="tend run not found")
 
@@ -157,11 +147,7 @@ async def get_tend(
     task_ids = [d.get("task_id") for d in dispatched if d.get("task_id")]
     tasks_by_id: dict[str, Task] = {}
     if task_ids:
-        rows = (
-            await db.execute(
-                select(Task).where(Task.id.in_(task_ids))
-            )
-        ).scalars().all()
+        rows = await tasks_repo.list_by_ids(db, task_ids)
         tasks_by_id = {t.id: t for t in rows}
 
     progress: list[dict[str, Any]] = []

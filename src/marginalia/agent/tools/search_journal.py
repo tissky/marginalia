@@ -19,11 +19,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
 from marginalia.db.models import Journal
+from marginalia.repositories import journal as journal_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -112,23 +112,16 @@ async def search_journal(
     order = args.get("order") or "recent_first"
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
-    stmt = select(Journal).where(
-        Journal.created_at >= cutoff,
-        Journal.source_kind.in_(kinds),
+    rows = await journal_repo.search(
+        db,
+        cutoff=cutoff,
+        kinds=kinds,
+        conversation_id=conversation_id,
+        include_superseded=include_superseded,
+        text=text_q,
+        order=order,
+        limit=limit * 4,
     )
-    if conversation_id:
-        stmt = stmt.where(Journal.conversation_id == conversation_id)
-    if not include_superseded:
-        stmt = stmt.where(Journal.superseded_by_id.is_(None))
-    if text_q:
-        like = f"%{text_q}%"
-        stmt = stmt.where(Journal.note.ilike(like))
-    if order == "oldest_first":
-        stmt = stmt.order_by(Journal.created_at.asc())
-    else:
-        stmt = stmt.order_by(Journal.created_at.desc())
-
-    rows = (await db.execute(stmt.limit(limit * 4))).scalars().all()
 
     # entry_id and tags filters: SQLite JSON cannot be cleanly filtered
     # server-side, so we post-filter in Python (results capped above).

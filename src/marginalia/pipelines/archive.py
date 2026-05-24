@@ -331,19 +331,11 @@ async def _resolve_archive_filename(file_row) -> str:
     """For read_segment: look up the entry's original display_name so
     py7zz sees the right suffix. Falls back to original_ext."""
     try:
-        from sqlalchemy import select
         from marginalia.db.engine import get_session_factory
-        from marginalia.db.models import FileEntry
+        from marginalia.repositories import entries as entries_repo
         factory = get_session_factory()
         async with factory() as s:
-            row = (
-                await s.execute(
-                    select(FileEntry.display_name)
-                    .where(FileEntry.file_id == file_row.id)
-                    .order_by(FileEntry.created_at.asc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
+            row = await entries_repo.find_first_display_name_for_file(s, file_row.id)
             if row:
                 return os.path.basename(row)
     except Exception:  # noqa: BLE001

@@ -7,11 +7,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import File, FileEntry
+from marginalia.repositories import entries as entries_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -50,18 +49,9 @@ async def list_files_in_folder(
 ) -> dict[str, Any]:
     folder_id = args["folder_id"]
     limit = min(int(args.get("limit") or 50), 200)
-    rows = (
-        await db.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.folder_id == folder_id,
-                FileEntry.deleted_at.is_(None),
-            )
-            .order_by(FileEntry.display_name)
-            .limit(limit)
-        )
-    ).all()
+    rows = await entries_repo.list_live_with_file_in_folder(
+        db, folder_id, limit=limit,
+    )
 
     return {
         "entries": [

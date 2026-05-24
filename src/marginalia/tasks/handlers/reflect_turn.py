@@ -30,15 +30,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select
-
 from marginalia.db.models import (
     Conversation,
-    EntryTag,
     File,
-    FileEntry,
     Journal,
-    Tag,
 )
 from marginalia.db.session import session_scope
 from marginalia.llm import (
@@ -47,6 +42,8 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories.task_outcomes import has_outcome, record_outcome
 from marginalia.tasks.kinds import task_handler
 from marginalia.utils.ids import new_id
@@ -211,21 +208,11 @@ def _looks_like_id(s: str) -> bool:
 async def _fetch_entry_metadata(session, entry_ids: list[str]) -> list[dict[str, Any]]:
     if not entry_ids:
         return []
-    rows = (
-        await session.execute(
-            select(FileEntry).where(FileEntry.id.in_(entry_ids))
-        )
-    ).scalars().all()
+    rows = await entries_repo.list_by_ids_any(session, entry_ids)
     out: list[dict[str, Any]] = []
     for e in rows:
         file_row = await session.get(File, e.file_id)
-        tag_rows = (
-            await session.execute(
-                select(Tag.name, Tag.facet)
-                .join(EntryTag, Tag.id == EntryTag.tag_id)
-                .where(EntryTag.entry_id == e.id)
-            )
-        ).all()
+        tag_rows = await entry_tags_repo.list_name_facet_for_entry(session, e.id)
         out.append({
             "entry_id": e.id,
             "display_name": e.display_name,

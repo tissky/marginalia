@@ -28,11 +28,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import delete, func, select, update
-
-from marginalia.db.models import AuditEvent, EntryTag, Tag, TagAlias
+from marginalia.db.models import AuditEvent, Tag, TagAlias
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.repositories import tags as tags_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -136,13 +135,7 @@ async def handle_normalize_tags(payload: Mapping[str, Any]) -> None:
 async def _normalize_one_facet(facet: str) -> dict[str, int] | None:
     """Return None if the facet was skipped (too few tags), else stats dict."""
     async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(Tag.id, Tag.name, Tag.alias_of, Tag.doc_count)
-                .where(Tag.facet == facet)
-                .order_by(Tag.doc_count.desc(), Tag.name)
-            )
-        ).all()
+        rows = await tags_repo.list_facet_tag_summaries(session, facet)
         canonical_only = [r for r in rows if r[2] is None]
         await session.commit()
 
@@ -251,20 +244,13 @@ async def _apply_one_merge(
         #    Find rows pointing at the merged tag where the SAME entry already
         #    has the canonical tag → DELETE the redundant ones. The remaining
         #    rows we UPDATE to point at canonical_id.
-        await session.execute(
-            delete(EntryTag).where(
-                EntryTag.tag_id == merge_id,
-                EntryTag.entry_id.in_(
-                    select(EntryTag.entry_id).where(EntryTag.tag_id == canonical_id)
-                ),
-            )
+        await tags_repo.delete_entry_tag_dups_for_merge(
+            session, merged_tag_id=merge_id, canonical_tag_id=canonical_id,
         )
-        result = await session.execute(
-            update(EntryTag)
-            .where(EntryTag.tag_id == merge_id)
-            .values(tag_id=canonical_id)
+        repointed = await tags_repo.repoint_entry_tags(
+            session, from_tag_id=merge_id, to_tag_id=canonical_id,
         )
-        entry_tags_redirected += int(result.rowcount or 0)
+        entry_tags_redirected += repointed
 
         # 3. Mark the merged tag as an alias and update mtime.
         merged.alias_of = canonical_id
@@ -279,7 +265,7 @@ async def _apply_one_merge(
                 "canonical_name": canonical.name,
                 "merged_tag_id": merge_id,
                 "merged_tag_name": merged.name,
-                "entry_tags_redirected": int(result.rowcount or 0),
+                "entry_tags_redirected": repointed,
             },
         )
 
@@ -294,18 +280,9 @@ async def _recompute_doc_counts(session) -> None:
     Aliases keep their last value (entry_tags should no longer point at them,
     so their counts will read 0 — that's correct).
     """
-    rows = (
-        await session.execute(
-            select(EntryTag.tag_id, func.count())
-            .group_by(EntryTag.tag_id)
-        )
-    ).all()
-    counts: dict[str, int] = {tag_id: c for tag_id, c in rows}
-
-    all_tag_ids = (await session.execute(select(Tag.id))).scalars().all()
+    counts = await tags_repo.entry_tag_counts_by_tag(session)
+    all_tag_ids = await tags_repo.all_ids(session)
     for tag_id in all_tag_ids:
-        await session.execute(
-            update(Tag)
-            .where(Tag.id == tag_id)
-            .values(doc_count=counts.get(tag_id, 0))
+        await tags_repo.set_doc_count(
+            session, tag_id=tag_id, doc_count=counts.get(tag_id, 0),
         )

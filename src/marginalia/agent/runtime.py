@@ -43,8 +43,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, AsyncIterator
 
-from sqlalchemy import select
-
 from marginalia.agent.stable_context import (
     build_stable_snapshot,
     render_system_prompt,
@@ -157,14 +155,7 @@ async def run_turn(
         raise AgentTurnError("user_message is empty")
 
     async with session_scope() as db:
-        last = (
-            await db.execute(
-                select(Conversation.turn_index)
-                .where(Conversation.session_id == session_id)
-                .order_by(Conversation.turn_index.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+        last = await session_service.latest_turn_index(db, session_id)
         turn_index = (last or -1) + 1
 
         conv = await session_service.start_conversation(

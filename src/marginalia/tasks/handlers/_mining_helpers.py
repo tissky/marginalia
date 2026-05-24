@@ -20,10 +20,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Mapping
 
-from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import AuditEvent, EntryRelation
+from marginalia.repositories import entry_relations as relations_repo
 from marginalia.utils.ids import new_id
 
 UpsertAction = Literal["incremented", "created"]
@@ -47,24 +47,16 @@ async def upsert_relation_pair(
     each miner can attach its own signal data (jaccard score, journal
     window, etc).
     """
-    existing = (
-        await session.execute(
-            select(EntryRelation).where(
-                EntryRelation.entry_a_id == entry_a_id,
-                EntryRelation.entry_b_id == entry_b_id,
-            )
-        )
-    ).scalar_one_or_none()
+    existing = await relations_repo.find_pair(
+        session, entry_a_id=entry_a_id, entry_b_id=entry_b_id,
+    )
 
     if existing is not None:
-        await session.execute(
-            update(EntryRelation)
-            .where(EntryRelation.id == existing.id)
-            .values(
-                observation_count=(existing.observation_count or 0)
-                + observation_add,
-                last_observed_at=now,
-            )
+        await relations_repo.bump_observation(
+            session,
+            relation_id=existing.id,
+            new_count=(existing.observation_count or 0) + observation_add,
+            last_observed_at=now,
         )
         rid = existing.id
         action: UpsertAction = "incremented"

@@ -39,17 +39,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select, update
-
 from marginalia.db.models import (
-    Conversation,
-    EntryTag,
     File,
-    FileEntry,
     Journal,
     Session,
-    Tag,
-    TaskOutcome,
 )
 from marginalia.db.session import session_scope
 from marginalia.llm import (
@@ -58,7 +51,11 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
-from marginalia.repositories.task_outcomes import record_outcome
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
+from marginalia.repositories import journal as journal_repo
+from marginalia.repositories import sessions as sessions_repo
+from marginalia.repositories.task_outcomes import has_outcome, record_outcome
 from marginalia.tasks.kinds import KIND_SUMMARIZE_SESSION, task_handler
 from marginalia.utils.ids import new_id
 
@@ -236,36 +233,19 @@ async def handle_summarize_session(payload: Mapping[str, Any]) -> None:
 
 async def _recently_summarized(session, session_id: str) -> bool:
     cutoff = _utcnow() - MIN_INTERVAL
-    row = (
-        await session.execute(
-            select(TaskOutcome.completed_at)
-            .where(
-                TaskOutcome.task_kind == KIND_SUMMARIZE_SESSION,
-                TaskOutcome.object_kind == "session",
-                TaskOutcome.object_id == session_id,
-                TaskOutcome.completed_at >= cutoff,
-            )
-            .order_by(TaskOutcome.completed_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    return row is not None
+    return await has_outcome(
+        session,
+        task_kind=KIND_SUMMARIZE_SESSION,
+        object_kind="session",
+        object_id=session_id,
+        since=cutoff,
+    )
 
 
 async def _fetch_reflect_rows(session, session_id: str) -> list[dict[str, Any]]:
-    rows = (
-        await session.execute(
-            select(Journal.id, Journal.note, Journal.entry_ids, Journal.tags,
-                   Journal.created_at, Journal.conversation_id)
-            .join(Conversation, Conversation.id == Journal.conversation_id)
-            .where(
-                Conversation.session_id == session_id,
-                Journal.source_kind == "reflect_turn",
-            )
-            .order_by(Journal.created_at.asc())
-            .limit(MAX_REFLECT_ROWS)
-        )
-    ).all()
+    rows = await journal_repo.list_reflect_rows_for_session(
+        session, session_id, limit=MAX_REFLECT_ROWS,
+    )
     return [
         {
             "id": jid,
@@ -298,21 +278,11 @@ async def _fetch_entry_metadata(
 ) -> list[dict[str, Any]]:
     if not entry_ids:
         return []
-    rows = (
-        await session.execute(
-            select(FileEntry).where(FileEntry.id.in_(entry_ids))
-        )
-    ).scalars().all()
+    rows = await entries_repo.list_by_ids_any(session, entry_ids)
     out: list[dict[str, Any]] = []
     for e in rows:
         file_row = await session.get(File, e.file_id)
-        tag_rows = (
-            await session.execute(
-                select(Tag.name, Tag.facet)
-                .join(EntryTag, Tag.id == EntryTag.tag_id)
-                .where(EntryTag.entry_id == e.id)
-            )
-        ).all()
+        tag_rows = await entry_tags_repo.list_name_facet_for_entry(session, e.id)
         out.append({
             "entry_id": e.id,
             "display_name": e.display_name,
@@ -328,37 +298,17 @@ async def _fetch_prior_insights(
 ) -> list[dict[str, Any]]:
     """Fetch active insights from OTHER sessions involving any entry in
     this session — gives the LLM the chain it might be replacing."""
-    own_conv_ids = (
-        await session.execute(
-            select(Conversation.id).where(Conversation.session_id == session_id)
-        )
-    ).scalars().all()
+    own_conv_ids = await sessions_repo.list_conversation_ids(session, session_id)
     if not own_conv_ids:
         return []
-    own_entries = set()
-    reflect_rows = (
-        await session.execute(
-            select(Journal.entry_ids)
-            .where(Journal.conversation_id.in_(own_conv_ids))
-        )
-    ).scalars().all()
-    for eids in reflect_rows:
-        for eid in (eids or []):
-            own_entries.add(eid)
+    own_entries: set[str] = set()
+    for eids in await journal_repo.list_entry_id_lists_for_conversations(
+        session, own_conv_ids,
+    ):
+        own_entries.update(eids)
     if not own_entries:
         return []
-    rows = (
-        await session.execute(
-            select(Journal.id, Journal.note, Journal.entry_ids,
-                   Journal.tags, Journal.created_at)
-            .where(
-                Journal.source_kind == "insight",
-                Journal.superseded_by_id.is_(None),
-            )
-            .order_by(Journal.created_at.desc())
-            .limit(20)
-        )
-    ).all()
+    rows = await journal_repo.list_active_insights_recent(session, limit=20)
     out: list[dict[str, Any]] = []
     for jid, note, eids, tags, created in rows:
         eid_set = set(eids or [])
@@ -375,14 +325,7 @@ async def _fetch_prior_insights(
 
 
 async def _last_conversation_id(session, session_id: str) -> str | None:
-    return (
-        await session.execute(
-            select(Conversation.id)
-            .where(Conversation.session_id == session_id)
-            .order_by(Conversation.turn_index.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
+    return await sessions_repo.last_conversation_id(session, session_id)
 
 
 async def _persist_insights(
@@ -419,20 +362,12 @@ async def _persist_insights(
     chain_count = 0
     if superseded_ids and inserted_ids:
         chain_to = inserted_ids[0]
-        valid_olds = (
-            await session.execute(
-                select(Journal.id).where(
-                    Journal.id.in_(superseded_ids),
-                    Journal.source_kind == "insight",
-                    Journal.superseded_by_id.is_(None),
-                )
-            )
-        ).scalars().all()
+        valid_olds = await journal_repo.filter_active_insight_ids(
+            session, superseded_ids,
+        )
         if valid_olds:
-            await session.execute(
-                update(Journal)
-                .where(Journal.id.in_(valid_olds))
-                .values(superseded_by_id=chain_to)
+            await journal_repo.mark_superseded(
+                session, valid_olds, by_id=chain_to,
             )
             chain_count = len(valid_olds)
 

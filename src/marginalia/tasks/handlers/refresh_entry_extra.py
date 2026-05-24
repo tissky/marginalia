@@ -25,16 +25,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select, update
-
-from marginalia.db.models import (
-    AuditEvent,
-    EntryTag,
-    File,
-    FileEntry,
-    Journal,
-    Tag,
-)
+from marginalia.db.models import AuditEvent
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage,
@@ -42,6 +33,9 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
+from marginalia.repositories import journal as journal_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -162,18 +156,13 @@ async def _build_candidates(
     """Find entries with ≥ min_journals journal mentions in the window."""
     cutoff = _utcnow() - timedelta(days=window_days)
     async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(Journal.id, Journal.entry_ids, Journal.note,
-                       Journal.created_at)
-                .where(Journal.created_at >= cutoff)
-                .order_by(Journal.created_at.desc())
-            )
-        ).all()
+        rows = await journal_repo.list_id_entry_ids_note_created(
+            session, cutoff=cutoff,
+        )
         # entry_id → list of (journal_id, journal_note, journal_created_at)
         mentions: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for jid, entry_ids, note, created_at in rows:
-            for eid in (entry_ids or []):
+            for eid in entry_ids:
                 mentions[str(eid)].append({
                     "journal_id": jid,
                     "note": note,
@@ -190,34 +179,19 @@ async def _build_candidates(
             return []
 
         # Pull entry + file metadata for each
-        entry_rows = (
-            await session.execute(
-                select(FileEntry, File)
-                .join(File, File.id == FileEntry.file_id)
-                .where(
-                    FileEntry.id.in_(eligible_ids),
-                    FileEntry.deleted_at.is_(None),
-                    FileEntry.lifecycle.in_(("active", "manual_active")),
-                )
-            )
-        ).all()
+        entry_rows = await entries_repo.list_active_with_file_by_ids(
+            session, eligible_ids,
+        )
         if not entry_rows:
             await session.commit()
             return []
 
         # Batch fetch tags for all eligible entries
-        tag_rows = (
-            await session.execute(
-                select(EntryTag.entry_id, Tag.name, Tag.facet)
-                .join(Tag, Tag.id == EntryTag.tag_id)
-                .where(
-                    EntryTag.entry_id.in_([e.id for e, _ in entry_rows]),
-                    Tag.alias_of.is_(None),
-                )
-            )
-        ).all()
+        tag_rows = await entry_tags_repo.list_id_name_facet_for_entries(
+            session, [e.id for e, _ in entry_rows],
+        )
         tags_by_entry: dict[str, list[dict[str, str]]] = defaultdict(list)
-        for eid, name, facet in tag_rows:
+        for eid, _tid, name, facet in tag_rows:
             tags_by_entry[eid].append({"name": name, "facet": facet})
 
         candidates: list[dict[str, Any]] = []
@@ -302,10 +276,8 @@ async def _process_one(
         return "noop"
 
     async with session_scope() as session:
-        await session.execute(
-            update(FileEntry)
-            .where(FileEntry.id == cand["entry_id"])
-            .values(extra=new_extra, updated_at=_utcnow())
+        await entries_repo.update_extra(
+            session, entry_id=cand["entry_id"], extra=new_extra, now=_utcnow(),
         )
         await AuditEvent.append(
             session,

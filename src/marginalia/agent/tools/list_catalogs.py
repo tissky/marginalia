@@ -6,11 +6,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import Catalog, FileEntry
+from marginalia.repositories import catalogs as catalogs_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -41,24 +40,8 @@ async def list_catalogs(
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
     parent_id = args.get("parent_id")
-    stmt = select(Catalog).where(Catalog.deleted_at.is_(None))
-    if parent_id is None:
-        stmt = stmt.where(Catalog.parent_id.is_(None))
-    else:
-        stmt = stmt.where(Catalog.parent_id == parent_id)
-    cats = (await db.execute(stmt.order_by(Catalog.name))).scalars().all()
-
-    counts_rows = (
-        await db.execute(
-            select(FileEntry.catalog_id, func.count())
-            .where(
-                FileEntry.catalog_id.isnot(None),
-                FileEntry.deleted_at.is_(None),
-            )
-            .group_by(FileEntry.catalog_id)
-        )
-    ).all()
-    direct_counts = {cid: c for cid, c in counts_rows}
+    cats = await catalogs_repo.list_live_children(db, parent_id)
+    direct_counts = await catalogs_repo.direct_entry_counts(db)
 
     return {
         "catalogs": [

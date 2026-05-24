@@ -23,11 +23,10 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import Conversation
 from marginalia.db.session import get_session
+from marginalia.repositories import conversations as conversations_repo
 from marginalia.services.exports import (
     ConversationNotFoundError,
     ExportNotReadyError,
@@ -52,14 +51,7 @@ async def latest_conversation(
     Used by the CLI to default `/export` when the user gives no id.
     Returns 404 if no conversation has ended yet.
     """
-    row = (
-        await session.execute(
-            select(Conversation)
-            .where(Conversation.ended_at.isnot(None))
-            .order_by(Conversation.ended_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
+    row = await conversations_repo.latest_ended(session)
     if row is None:
         raise HTTPException(status_code=404, detail="no ended conversation found")
     preview = (row.user_message or "").strip()

@@ -30,13 +30,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
 from marginalia.db.models import File, FileEntry
 from marginalia.pipelines.base import Pipeline, SegmentResult
 from marginalia.pipelines.registry import resolve_pipeline
+from marginalia.repositories import entries as entries_repo
 from marginalia.storage import get_storage
 
 
@@ -113,13 +113,7 @@ async def read_files(
         return {"ok": True, "results": [], "count": 0}
 
     entry_ids = [r["entry_id"] for r in requests if r.get("entry_id")]
-    rows = (
-        await db.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(FileEntry.id.in_(entry_ids))
-        )
-    ).all()
+    rows = await entries_repo.list_with_file_by_ids_any(db, entry_ids)
     by_entry: dict[str, tuple[FileEntry, File]] = {
         e.id: (e, f) for e, f in rows
     }

@@ -15,11 +15,10 @@ import re
 from datetime import datetime
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import File, FileEntry
+from marginalia.repositories import entries as entries_repo
 from marginalia.storage import get_storage
 
 
@@ -84,17 +83,7 @@ async def query_log(
     since_ts = _parse_iso(since_str)
     until_ts = _parse_iso(until_str)
 
-    pair = (
-        await db.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.id == entry_id,
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
-        )
-    ).first()
+    pair = await entries_repo.get_live_with_file(db, entry_id)
     if pair is None:
         return {"error": "entry not found", "entry_id": entry_id}
     entry, file_row = pair

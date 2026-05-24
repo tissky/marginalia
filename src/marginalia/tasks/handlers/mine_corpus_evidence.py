@@ -34,17 +34,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select
-
 from marginalia.db.models import (
     AuditEvent,
-    Catalog,
     EntryRelation,
-    EntryTag,
-    File,
-    FileEntry,
-    Tag,
-    TaskOutcome,
 )
 from marginalia.db.session import session_scope
 from marginalia.llm import (
@@ -53,10 +45,15 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.repositories import catalogs as catalogs_repo
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_relations as relations_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
     record_outcome,
+    select_object_ids,
 )
 from marginalia.utils.ids import new_id
 
@@ -239,42 +236,24 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
 async def _build_candidate_pool(*, max_pairs: int) -> list[dict[str, Any]]:
     """Sample structurally-linked pairs not previously evaluated/related."""
     async with session_scope() as session:
-        already_evaluated_ids: set[str] = set(
-            (await session.execute(
-                select(TaskOutcome.object_id).where(
-                    TaskOutcome.task_kind == "mine_corpus_evidence",
-                    TaskOutcome.object_kind == "entry_pair",
-                )
-            )).scalars().all()
+        already_evaluated_ids = await select_object_ids(
+            session,
+            task_kind="mine_corpus_evidence",
+            object_kind="entry_pair",
         )
-        existing_pairs: set[str] = set(
-            f"{a}|{b}" for a, b in (await session.execute(
-                select(EntryRelation.entry_a_id, EntryRelation.entry_b_id)
-            )).all()
-        )
+        existing_pairs: set[str] = {
+            f"{a}|{b}" for a, b in await relations_repo.list_pair_keys(session)
+        }
 
-        live_entries = (
-            await session.execute(
-                select(FileEntry, File)
-                .join(File, File.id == FileEntry.file_id)
-                .where(
-                    FileEntry.deleted_at.is_(None),
-                    File.deleted_at.is_(None),
-                    FileEntry.lifecycle.in_(("active", "manual_active")),
-                )
-            )
-        ).all()
+        live_entries = await entries_repo.list_live_active_with_file(session)
         if len(live_entries) < 2:
             await session.commit()
             return []
 
         # tag map: entry_id -> set of tag_id
-        tag_rows = (
-            await session.execute(
-                select(EntryTag.entry_id, EntryTag.tag_id)
-                .where(EntryTag.entry_id.in_([e.id for e, _ in live_entries]))
-            )
-        ).all()
+        tag_rows = await entry_tags_repo.list_tag_ids_for_entries(
+            session, [e.id for e, _ in live_entries],
+        )
         tags_by_entry: dict[str, set[str]] = {}
         for eid, tid in tag_rows:
             tags_by_entry.setdefault(eid, set()).add(tid)
@@ -337,11 +316,7 @@ async def _catalog_ancestors(session, live_entries) -> dict[str, set[str]]:
     if not cat_ids:
         return out
     parent_of: dict[str, str | None] = {}
-    rows = (
-        await session.execute(
-            select(Catalog.id, Catalog.parent_id).where(Catalog.deleted_at.is_(None))
-        )
-    ).all()
+    rows = await catalogs_repo.list_live_id_parent(session)
     for cid, pid in rows:
         parent_of[cid] = pid
     for e, _ in live_entries:

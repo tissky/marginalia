@@ -6,16 +6,58 @@ instead of writing inline `select()` statements.
 """
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import delete, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import File, FileEntry
+from marginalia.db.models import EntryTag, File, FileEntry, TaskOutcome
 
 
 def _folder_clause(folder_id: str | None):
     if folder_id is None:
         return FileEntry.folder_id.is_(None)
     return FileEntry.folder_id == folder_id
+
+
+async def list_live_with_file_in_folder(
+    db: AsyncSession, folder_id: str, *, limit: int,
+) -> list[tuple[FileEntry, File]]:
+    """Live entries (joined with file) inside one folder, ordered by
+    display_name, capped at `limit`. Used by the list_files_in_folder
+    agent tool."""
+    rows = (
+        await db.execute(
+            select(FileEntry, File)
+            .join(File, File.id == FileEntry.file_id)
+            .where(
+                FileEntry.folder_id == folder_id,
+                FileEntry.deleted_at.is_(None),
+            )
+            .order_by(FileEntry.display_name)
+            .limit(limit)
+        )
+    ).all()
+    return [(e, f) for e, f in rows]
+
+
+async def list_live_in_folder(
+    db: AsyncSession, folder_id: str,
+) -> list[FileEntry]:
+    """Live entries directly under one folder, ordered by display_name.
+    Used by routes_folders.get_folder for the children listing."""
+    rows = (
+        await db.execute(
+            select(FileEntry)
+            .where(
+                FileEntry.folder_id == folder_id,
+                FileEntry.deleted_at.is_(None),
+            )
+            .order_by(FileEntry.display_name)
+        )
+    ).scalars().all()
+    return list(rows)
 
 
 async def find_live_by_folder_and_name(
@@ -132,6 +174,136 @@ async def list_live_with_file_in_folders(
     return [(e, f) for e, f in rows]
 
 
+async def search_filtered(
+    db: AsyncSession,
+    *,
+    text: str | None = None,
+    lifecycle: list[str] | None = None,
+    kind: str | None = None,
+    catalog_one: str | None = None,
+    catalog_in: list[str] | None = None,
+    tags_all: list[str] | None = None,
+    tags_any: list[str] | None = None,
+    tags_none: list[str] | None = None,
+    extra_entry_ids: list[str] | None = None,
+    limit: int | None = None,
+) -> list[tuple[FileEntry, File]]:
+    """The unified entry search used by `search_metadata` (agent tool) and
+    `materialize_view`. All filters are conjunctive; an unset filter is a
+    no-op. tag filters resolve through EntryTag subqueries."""
+    stmt = (
+        select(FileEntry, File)
+        .join(File, File.id == FileEntry.file_id)
+        .where(
+            FileEntry.deleted_at.is_(None),
+            File.deleted_at.is_(None),
+        )
+    )
+    if lifecycle:
+        stmt = stmt.where(FileEntry.lifecycle.in_(lifecycle))
+    if kind:
+        stmt = stmt.where(File.kind == kind)
+    if text:
+        like = f"%{text}%"
+        stmt = stmt.where(or_(
+            File.summary.ilike(like),
+            File.extra.ilike(like),
+            FileEntry.extra.ilike(like),
+            FileEntry.display_name.ilike(like),
+        ))
+    if catalog_one is not None:
+        stmt = stmt.where(FileEntry.catalog_id == catalog_one)
+    elif catalog_in is not None:
+        if not catalog_in:
+            return []
+        stmt = stmt.where(FileEntry.catalog_id.in_(catalog_in))
+    for tid in tags_all or ():
+        sub = select(EntryTag.entry_id).where(EntryTag.tag_id == tid)
+        stmt = stmt.where(FileEntry.id.in_(sub))
+    if tags_any:
+        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_any))
+        stmt = stmt.where(FileEntry.id.in_(sub))
+    if tags_none:
+        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_none))
+        stmt = stmt.where(not_(FileEntry.id.in_(sub)))
+    if extra_entry_ids is not None:
+        if not extra_entry_ids:
+            return []
+        stmt = stmt.where(FileEntry.id.in_(extra_entry_ids))
+    stmt = stmt.order_by(FileEntry.updated_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    rows = (await db.execute(stmt)).all()
+    return [(e, f) for e, f in rows]
+
+
+async def list_ids_under_filter_spec(
+    db: AsyncSession,
+    spec: dict[str, Any],
+    *,
+    default_lifecycle: list[str],
+    catalog_subtree_expander,
+) -> list[str]:
+    """Evaluate a view's filter_spec and return matching entry_ids.
+    `catalog_subtree_expander(root_id) -> list[str]` is injected so this
+    repo doesn't import the catalogs repo (and breaks no layering)."""
+    stmt = (
+        select(FileEntry.id)
+        .where(FileEntry.deleted_at.is_(None))
+        .where(FileEntry.lifecycle.in_(spec.get("lifecycle") or default_lifecycle))
+    )
+    sub = spec.get("catalog_subtree") or []
+    if sub:
+        ids: list[str] = []
+        for r in sub:
+            ids.extend(await catalog_subtree_expander(r))
+        if not ids:
+            return []
+        stmt = stmt.where(FileEntry.catalog_id.in_(ids))
+    for tid in spec.get("tags_all") or []:
+        s = select(EntryTag.entry_id).where(EntryTag.tag_id == tid)
+        stmt = stmt.where(FileEntry.id.in_(s))
+    if spec.get("tags_any"):
+        s = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(spec["tags_any"]))
+        stmt = stmt.where(FileEntry.id.in_(s))
+    if spec.get("tags_none"):
+        s = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(spec["tags_none"]))
+        stmt = stmt.where(not_(FileEntry.id.in_(s)))
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_with_file_by_ids_any(
+    db: AsyncSession, entry_ids: list[str],
+) -> list[tuple[FileEntry, File]]:
+    """Entries + files for the given ids, no deleted_at filter. The
+    read_files tool wants to differentiate "not found" from "soft-deleted",
+    so it can't use the live-only flavour."""
+    if not entry_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(FileEntry, File)
+            .join(File, File.id == FileEntry.file_id)
+            .where(FileEntry.id.in_(entry_ids))
+        )
+    ).all()
+    return [(e, f) for e, f in rows]
+
+
+async def list_by_ids_any(
+    db: AsyncSession, entry_ids: list[str],
+) -> list[FileEntry]:
+    """Entries (no File join, no deleted filter) for the given ids."""
+    if not entry_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(FileEntry).where(FileEntry.id.in_(entry_ids))
+        )
+    ).scalars().all()
+    return list(rows)
+
+
 async def list_live_with_file_by_ids(
     db: AsyncSession, entry_ids: list[str],
 ) -> list[tuple[FileEntry, File]]:
@@ -170,6 +342,57 @@ async def filter_live_ids(
     return list(rows)
 
 
+async def list_purge_due(
+    db: AsyncSession, now: datetime,
+) -> list[FileEntry]:
+    """Soft-deleted entries past their purge_after timestamp. Used by the
+    purge_deleted_files handler — it physically deletes them."""
+    rows = (
+        await db.execute(
+            select(FileEntry).where(
+                FileEntry.deleted_at.isnot(None),
+                FileEntry.purge_after.isnot(None),
+                FileEntry.purge_after < now,
+            )
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def hard_delete_by_id(db: AsyncSession, entry_id: str) -> None:
+    """Physical delete (FK CASCADE clears entry_tags). Used by the purge
+    handler — this is the only legal path for a hard entry delete."""
+    await db.execute(delete(FileEntry).where(FileEntry.id == entry_id))
+
+
+async def has_live_entry_for_file(
+    db: AsyncSession, file_id: str,
+) -> bool:
+    """True if any live entry still references `file_id`. Used by the purge
+    handler to decide whether to drop the file row + storage object."""
+    row = (
+        await db.execute(
+            select(FileEntry.id).where(
+                FileEntry.file_id == file_id,
+                FileEntry.deleted_at.is_(None),
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
+async def has_any_entry_for_file(
+    db: AsyncSession, file_id: str,
+) -> bool:
+    """True if any entry (live or soft-deleted) still references `file_id`."""
+    row = (
+        await db.execute(
+            select(FileEntry.id).where(FileEntry.file_id == file_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
 async def list_display_names(
     db: AsyncSession, entry_ids: list[str],
 ) -> dict[str, str]:
@@ -184,3 +407,224 @@ async def list_display_names(
         )
     ).all()
     return {eid: name for eid, name in rows}
+
+
+async def list_live_active_with_file(
+    db: AsyncSession,
+) -> list[tuple[FileEntry, File]]:
+    """Live entries with lifecycle in {active, manual_active} joined to their
+    live file rows. Used by mine_corpus_evidence's candidate-pool builder."""
+    rows = (
+        await db.execute(
+            select(FileEntry, File)
+            .join(File, File.id == FileEntry.file_id)
+            .where(
+                FileEntry.deleted_at.is_(None),
+                File.deleted_at.is_(None),
+                FileEntry.lifecycle.in_(("active", "manual_active")),
+            )
+        )
+    ).all()
+    return [(e, f) for e, f in rows]
+
+
+async def list_active_with_file_by_ids(
+    db: AsyncSession, entry_ids: list[str],
+) -> list[tuple[FileEntry, File]]:
+    """Live entries with lifecycle in {active, manual_active} joined to their
+    file rows, restricted to `entry_ids`. Used by refresh_entry_extra to
+    resolve a candidate set produced from journal mentions."""
+    if not entry_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(FileEntry, File)
+            .join(File, File.id == FileEntry.file_id)
+            .where(
+                FileEntry.id.in_(entry_ids),
+                FileEntry.deleted_at.is_(None),
+                FileEntry.lifecycle.in_(("active", "manual_active")),
+            )
+        )
+    ).all()
+    return [(e, f) for e, f in rows]
+
+
+async def list_active_recent_updated(
+    db: AsyncSession, *, limit: int,
+) -> list[FileEntry]:
+    """Top-N most-recently-updated active entries (no File join). Used by
+    restructure_catalogs to feed the LLM a high-activity sample."""
+    rows = (
+        await db.execute(
+            select(FileEntry)
+            .where(
+                FileEntry.lifecycle.in_(("active", "manual_active")),
+                FileEntry.deleted_at.is_(None),
+            )
+            .order_by(FileEntry.updated_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def list_active_with_file_eligible_for_enrich(
+    db: AsyncSession, *, recent_cutoff: datetime, limit: int,
+) -> list[tuple[FileEntry, File]]:
+    """Active live entries whose file is ingest_status='done' and which were
+    NOT recently enriched (no task_outcomes row with task_kind='enrich_tags',
+    object_kind='file_entry', completed_at >= recent_cutoff). Ordered by
+    created_at asc. Used by enrich_tags."""
+    recently = (
+        select(TaskOutcome.object_id)
+        .where(
+            TaskOutcome.task_kind == "enrich_tags",
+            TaskOutcome.object_kind == "file_entry",
+            TaskOutcome.completed_at >= recent_cutoff,
+        )
+    ).subquery()
+    rows = (
+        await db.execute(
+            select(FileEntry, File)
+            .join(File, File.id == FileEntry.file_id)
+            .where(
+                FileEntry.lifecycle.in_(("active", "manual_active")),
+                FileEntry.deleted_at.is_(None),
+                File.ingest_status == "done",
+                File.deleted_at.is_(None),
+                not_(FileEntry.id.in_(select(recently.c.object_id))),
+            )
+            .order_by(FileEntry.created_at.asc())
+            .limit(limit)
+        )
+    ).all()
+    return [(e, f) for e, f in rows]
+
+
+async def list_active_for_demotion(
+    db: AsyncSession, *, cutoff_age: datetime,
+) -> list[tuple[str, datetime]]:
+    """`(entry_id, created_at)` for live active entries created at or before
+    `cutoff_age`, oldest first. Used by suggest_lifecycle's demote phase."""
+    rows = (
+        await db.execute(
+            select(FileEntry.id, FileEntry.created_at)
+            .where(
+                FileEntry.lifecycle == "active",
+                FileEntry.deleted_at.is_(None),
+                FileEntry.created_at <= cutoff_age,
+            )
+            .order_by(FileEntry.created_at.asc())
+        )
+    ).all()
+    return [(eid, ca) for eid, ca in rows]
+
+
+async def list_demoted_for_archive(
+    db: AsyncSession, *, cutoff_demoted: datetime,
+) -> list[tuple[str, datetime]]:
+    """`(entry_id, updated_at)` for live demoted entries last updated at or
+    before `cutoff_demoted`, oldest first. Used by suggest_lifecycle's
+    archive phase."""
+    rows = (
+        await db.execute(
+            select(FileEntry.id, FileEntry.updated_at)
+            .where(
+                FileEntry.lifecycle == "demoted",
+                FileEntry.deleted_at.is_(None),
+                FileEntry.updated_at <= cutoff_demoted,
+            )
+            .order_by(FileEntry.updated_at.asc())
+        )
+    ).all()
+    return [(eid, ua) for eid, ua in rows]
+
+
+async def transition_lifecycle(
+    db: AsyncSession,
+    *,
+    entry_id: str,
+    from_lifecycle: str,
+    to_lifecycle: str,
+    now: datetime,
+) -> int:
+    """Guarded lifecycle transition: only fires if the row is still in
+    `from_lifecycle` and not soft-deleted. Returns rowcount so the caller
+    can detect a race (rowcount=0 means the row's state changed first)."""
+    result = await db.execute(
+        update(FileEntry)
+        .where(
+            FileEntry.id == entry_id,
+            FileEntry.lifecycle == from_lifecycle,
+            FileEntry.deleted_at.is_(None),
+        )
+        .values(lifecycle=to_lifecycle, updated_at=now)
+    )
+    return int(result.rowcount or 0)
+
+
+async def update_extra(
+    db: AsyncSession, *, entry_id: str, extra: str | None, now: datetime,
+) -> None:
+    """Set `entry.extra` and bump updated_at. Used by refresh_entry_extra."""
+    await db.execute(
+        update(FileEntry)
+        .where(FileEntry.id == entry_id)
+        .values(extra=extra, updated_at=now)
+    )
+
+
+async def list_sibling_display_names(
+    db: AsyncSession, *, folder_id: str | None, exclude_entry_id: str,
+) -> list[str]:
+    """Display names of every other live entry in the same folder, ordered
+    by name. Used by ingest_file's pipeline-context builder."""
+    if folder_id is None:
+        clause = FileEntry.folder_id.is_(None)
+    else:
+        clause = FileEntry.folder_id == folder_id
+    rows = (
+        await db.execute(
+            select(FileEntry.display_name)
+            .where(
+                clause,
+                FileEntry.id != exclude_entry_id,
+                FileEntry.deleted_at.is_(None),
+            )
+            .order_by(FileEntry.display_name)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def find_first_live_for_file(
+    db: AsyncSession, file_id: str,
+) -> FileEntry | None:
+    """Oldest live entry pointing at `file_id`. Used by ingest_file to pick
+    the entry whose AI fields will be filled."""
+    return (
+        await db.execute(
+            select(FileEntry)
+            .where(FileEntry.file_id == file_id, FileEntry.deleted_at.is_(None))
+            .order_by(FileEntry.created_at)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def find_first_display_name_for_file(
+    db: AsyncSession, file_id: str,
+) -> str | None:
+    """Display name of the oldest entry pointing at `file_id` (live or
+    soft-deleted). Used by pipelines.archive to pick a stable filename hint
+    for py7zz."""
+    row = (
+        await db.execute(
+            select(FileEntry.display_name)
+            .where(FileEntry.file_id == file_id)
+            .order_by(FileEntry.created_at.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row

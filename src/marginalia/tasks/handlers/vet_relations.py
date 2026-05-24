@@ -40,13 +40,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Mapping
 
-from sqlalchemy import or_, select, update
-
-from marginalia.db.models import AuditEvent, EntryRelation, File, FileEntry
+from marginalia.db.models import AuditEvent
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage, ChatRequest, TextBlock, get_chat_client,
 )
+from marginalia.repositories import entry_relations as relations_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -174,15 +173,13 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
                     continue
                 yes = v["verdict"] == "yes"
                 reason = (v.get("reason") or "").strip()[:500]
-                await session.execute(
-                    update(EntryRelation)
-                    .where(EntryRelation.id == cand["relation_id"])
-                    .values(
-                        vetted=yes,
-                        vetted_reason=reason,
-                        vetted_at=now,
-                        vetted_observation_count=cand["observation_count"],
-                    )
+                await relations_repo.update_vetted(
+                    session,
+                    relation_id=cand["relation_id"],
+                    vetted=yes,
+                    vetted_reason=reason,
+                    vetted_at=now,
+                    vetted_observation_count=cand["observation_count"],
                 )
                 await AuditEvent.append(
                     session,
@@ -275,56 +272,16 @@ async def _fetch_candidates(
     Joins both endpoints' file rows for summary + tags content.
     """
     async with session_scope() as session:
-        # SQLAlchemy: aliasing files for both endpoints. Use raw query
-        # with subqueries to keep it portable.
-        from sqlalchemy.orm import aliased
-        FA = aliased(FileEntry, name="fa")
-        FB = aliased(FileEntry, name="fb")
-        FilA = aliased(File, name="filA")
-        FilB = aliased(File, name="filB")
-
-        rows = (
-            await session.execute(
-                select(
-                    EntryRelation.id,
-                    EntryRelation.entry_a_id,
-                    EntryRelation.entry_b_id,
-                    EntryRelation.observation_count,
-                    EntryRelation.vetted,
-                    EntryRelation.vetted_at,
-                    EntryRelation.vetted_observation_count,
-                    EntryRelation.note,
-                    EntryRelation.source_kind,
-                    FA.display_name.label("a_name"),
-                    FB.display_name.label("b_name"),
-                    FilA.summary.label("a_summary"),
-                    FilB.summary.label("b_summary"),
-                    FilA.kind.label("a_kind"),
-                    FilB.kind.label("b_kind"),
-                )
-                .select_from(EntryRelation)
-                .join(FA, FA.id == EntryRelation.entry_a_id)
-                .join(FB, FB.id == EntryRelation.entry_b_id)
-                .join(FilA, FilA.id == FA.file_id)
-                .join(FilB, FilB.id == FB.file_id)
-                .where(
-                    FA.deleted_at.is_(None),
-                    FB.deleted_at.is_(None),
-                    EntryRelation.observation_count >= min_obs,
-                    FilA.summary.is_not(None),
-                    FilB.summary.is_not(None),
-                )
-                .order_by(EntryRelation.observation_count.desc())
-            )
-        ).all()
+        rows = await relations_repo.list_vet_candidates(
+            session, min_obs=min_obs,
+        )
 
         out: list[dict[str, Any]] = []
         for r in rows:
-            (
-                rid, a_id, b_id, obs, vetted, vetted_at,
-                vetted_obs, note, src,
-                a_name, b_name, a_sum, b_sum, a_kind, b_kind,
-            ) = r
+            obs = r["observation_count"]
+            vetted = r["vetted"]
+            vetted_at = r["vetted_at"]
+            vetted_obs = r["vetted_observation_count"]
             should_vet = False
             if vetted is None:
                 should_vet = True
@@ -337,19 +294,19 @@ async def _fetch_candidates(
             if not should_vet:
                 continue
             out.append({
-                "pair_id": rid,
-                "relation_id": rid,
-                "entry_a_id": a_id,
-                "entry_b_id": b_id,
+                "pair_id": r["id"],
+                "relation_id": r["id"],
+                "entry_a_id": r["entry_a_id"],
+                "entry_b_id": r["entry_b_id"],
                 "observation_count": obs,
-                "source_kind": src,
-                "note": note,
-                "a_name": a_name,
-                "b_name": b_name,
-                "a_summary": a_sum,
-                "b_summary": b_sum,
-                "a_kind": a_kind,
-                "b_kind": b_kind,
+                "source_kind": r["source_kind"],
+                "note": r["note"],
+                "a_name": r["a_name"],
+                "b_name": r["b_name"],
+                "a_summary": r["a_summary"],
+                "b_summary": r["b_summary"],
+                "a_kind": r["a_kind"],
+                "b_kind": r["b_kind"],
             })
             if len(out) >= cap:
                 break

@@ -59,6 +59,60 @@ async def create_session(
     return s
 
 
+async def latest_turn_index(
+    db: AsyncSession, session_id: str,
+) -> int | None:
+    """Highest turn_index already recorded for a session, or None if there
+    are no conversations yet. Used by the runtime to compute the next turn."""
+    return (
+        await db.execute(
+            select(Conversation.turn_index)
+            .where(Conversation.session_id == session_id)
+            .order_by(Conversation.turn_index.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def list_conversation_ids(
+    db: AsyncSession, session_id: str,
+) -> list[str]:
+    """All conversation ids belonging to `session_id`, unordered."""
+    rows = (
+        await db.execute(
+            select(Conversation.id).where(Conversation.session_id == session_id)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def last_conversation_id(
+    db: AsyncSession, session_id: str,
+) -> str | None:
+    """Conversation id with the highest turn_index in `session_id`."""
+    return (
+        await db.execute(
+            select(Conversation.id)
+            .where(Conversation.session_id == session_id)
+            .order_by(Conversation.turn_index.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def list_for_session(
+    db: AsyncSession, session_id: str,
+) -> list[Conversation]:
+    """All conversation rows for `session_id`. Used by close_session
+    to roll up totals."""
+    rows = (
+        await db.execute(
+            select(Conversation).where(Conversation.session_id == session_id)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
 async def start_conversation(
     db: AsyncSession,
     *,
@@ -179,11 +233,7 @@ async def close_session(
     s = await db.get(Session, session_id)
     if s is None:
         raise ValueError(f"session {session_id} missing")
-    convs = (
-        await db.execute(
-            select(Conversation).where(Conversation.session_id == session_id)
-        )
-    ).scalars().all()
+    convs = await list_for_session(db, session_id)
     s.turn_count = len(convs)
     s.total_input_tokens = sum(c.total_input_tokens or 0 for c in convs)
     s.total_output_tokens = sum(c.total_output_tokens or 0 for c in convs)

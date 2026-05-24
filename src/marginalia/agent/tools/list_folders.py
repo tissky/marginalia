@@ -7,11 +7,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import Folder
+from marginalia.repositories import folders as folders_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -42,13 +41,7 @@ async def list_folders(
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
     parent_id = args.get("parent_id")
-    stmt = select(Folder).where(Folder.deleted_at.is_(None))
-    if parent_id is None:
-        stmt = stmt.where(Folder.parent_id.is_(None))
-    else:
-        stmt = stmt.where(Folder.parent_id == parent_id)
-    stmt = stmt.order_by(Folder.name)
-    rows = (await db.execute(stmt)).scalars().all()
+    rows = await folders_repo.list_children(db, parent_id)
     return {
         "folders": [
             {

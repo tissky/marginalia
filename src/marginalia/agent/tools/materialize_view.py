@@ -15,11 +15,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from sqlalchemy import not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
-from marginalia.db.models import Catalog, EntryTag, File, FileEntry, View
+from marginalia.db.models import View
+from marginalia.repositories import catalogs as catalogs_repo
+from marginalia.repositories import entries as entries_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -58,48 +59,28 @@ async def materialize_view(
         return {"error": "view not found", "id": view_id}
     spec: dict[str, Any] = v.filter_spec or {}
 
-    stmt = (
-        select(FileEntry, File)
-        .join(File, File.id == FileEntry.file_id)
-        .where(
-            FileEntry.deleted_at.is_(None),
-            File.deleted_at.is_(None),
-        )
-    )
-
-    # lifecycle (default active variants)
     lifecycle = spec.get("lifecycle") or ["active", "manual_active"]
-    stmt = stmt.where(FileEntry.lifecycle.in_(lifecycle))
 
-    # kind
-    if spec.get("kind"):
-        stmt = stmt.where(File.kind == spec["kind"])
-
-    # catalog_subtree (recursive)
+    catalog_in: list[str] | None = None
     subtree = spec.get("catalog_subtree") or []
     if subtree:
-        all_cat_ids = await _expand_catalog_subtree(db, subtree)
-        if not all_cat_ids:
+        ids: list[str] = []
+        for r in subtree:
+            ids.extend(await catalogs_repo.expand_subtree(db, r))
+        if not ids:
             return {"view_id": view_id, "name": v.name, "entries": [], "count": 0}
-        stmt = stmt.where(FileEntry.catalog_id.in_(all_cat_ids))
+        catalog_in = ids
 
-    # tags
-    tags_all = spec.get("tags_all") or []
-    for tid in tags_all:
-        sub = select(EntryTag.entry_id).where(EntryTag.tag_id == tid)
-        stmt = stmt.where(FileEntry.id.in_(sub))
-    tags_any = spec.get("tags_any") or []
-    if tags_any:
-        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_any))
-        stmt = stmt.where(FileEntry.id.in_(sub))
-    tags_none = spec.get("tags_none") or []
-    if tags_none:
-        sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_none))
-        stmt = stmt.where(not_(FileEntry.id.in_(sub)))
-
-    rows = (
-        await db.execute(stmt.order_by(FileEntry.updated_at.desc()).limit(limit))
-    ).all()
+    rows = await entries_repo.search_filtered(
+        db,
+        lifecycle=lifecycle,
+        kind=spec.get("kind"),
+        catalog_in=catalog_in,
+        tags_all=spec.get("tags_all") or [],
+        tags_any=spec.get("tags_any") or [],
+        tags_none=spec.get("tags_none") or [],
+        limit=limit,
+    )
 
     return {
         "view_id": view_id,
@@ -117,26 +98,3 @@ async def materialize_view(
         ],
         "count": len(rows),
     }
-
-
-async def _expand_catalog_subtree(
-    db: AsyncSession, roots: list[str]
-) -> list[str]:
-    """Return ids of `roots` plus all descendants (live only)."""
-    seen: set[str] = set(roots)
-    frontier = list(roots)
-    while frontier:
-        children = (
-            await db.execute(
-                select(Catalog.id).where(
-                    Catalog.parent_id.in_(frontier),
-                    Catalog.deleted_at.is_(None),
-                )
-            )
-        ).scalars().all()
-        new = [c for c in children if c not in seen]
-        if not new:
-            break
-        seen.update(new)
-        frontier = new
-    return list(seen)

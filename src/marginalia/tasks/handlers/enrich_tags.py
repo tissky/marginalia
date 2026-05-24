@@ -40,17 +40,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import not_, select
-
-from marginalia.db.models import (
-    EntryTag,
-    File,
-    FileEntry,
-    Tag,
-    TaskOutcome,
-)
+from marginalia.db.models import EntryTag
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
+from marginalia.repositories import tags as tags_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
@@ -192,42 +187,15 @@ async def _select_candidates(*, cutoff: datetime, limit: int) -> list[dict[str, 
     for business logic.
     """
     async with session_scope() as session:
-        recently_enriched_subq = (
-            select(TaskOutcome.object_id)
-            .where(
-                TaskOutcome.task_kind == ENRICH_TASK_KIND,
-                TaskOutcome.object_kind == "file_entry",
-                TaskOutcome.completed_at >= cutoff,
-            )
-        ).subquery()
-
-        rows = (
-            await session.execute(
-                select(FileEntry, File)
-                .join(File, File.id == FileEntry.file_id)
-                .where(
-                    FileEntry.lifecycle.in_(("active", "manual_active")),
-                    FileEntry.deleted_at.is_(None),
-                    File.ingest_status == "done",
-                    File.deleted_at.is_(None),
-                    not_(
-                        FileEntry.id.in_(select(recently_enriched_subq.c.object_id))
-                    ),
-                )
-                .order_by(FileEntry.created_at.asc())
-                .limit(limit)
-            )
-        ).all()
+        rows = await entries_repo.list_active_with_file_eligible_for_enrich(
+            session, recent_cutoff=cutoff, limit=limit,
+        )
 
         candidates: list[dict[str, Any]] = []
         for entry, file_row in rows:
-            existing_tags = (
-                await session.execute(
-                    select(Tag.id, Tag.name, Tag.facet)
-                    .join(EntryTag, Tag.id == EntryTag.tag_id)
-                    .where(EntryTag.entry_id == entry.id)
-                )
-            ).all()
+            existing_tags = await entry_tags_repo.list_existing_for_entry(
+                session, entry.id,
+            )
             candidates.append({
                 "entry_id": entry.id,
                 "display_name": entry.display_name,
@@ -248,14 +216,9 @@ async def _load_vocabulary() -> dict[str, list[dict[str, Any]]]:
     async with session_scope() as session:
         out: dict[str, list[dict[str, Any]]] = {}
         for facet in ("topic", "form", "time", "source", "language", "extra"):
-            rows = (
-                await session.execute(
-                    select(Tag.id, Tag.name, Tag.doc_count)
-                    .where(Tag.facet == facet, Tag.alias_of.is_(None))
-                    .order_by(Tag.doc_count.desc(), Tag.name)
-                    .limit(TAG_VOCAB_TOP_PER_FACET)
-                )
-            ).all()
+            rows = await tags_repo.list_canonical_per_facet(
+                session, facet=facet, limit=TAG_VOCAB_TOP_PER_FACET,
+            )
             if rows:
                 out[facet] = [
                     {"id": r[0], "name": r[1], "doc_count": r[2] or 0}
@@ -341,9 +304,7 @@ async def _apply_assignments(
             picks = [t for t in picks if t in valid_tag_ids]
 
             existing_tag_ids: set[str] = set(
-                (await session.execute(
-                    select(EntryTag.tag_id).where(EntryTag.entry_id == entry_id)
-                )).scalars().all()
+                await entry_tags_repo.list_tag_ids_for_entry(session, entry_id)
             )
 
             # Dedup within the call: LLM may emit the same id twice. Preserve

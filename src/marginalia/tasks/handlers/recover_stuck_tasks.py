@@ -21,11 +21,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select, update
-
 from marginalia.db.models import AuditEvent
-from marginalia.db.models.tasks import Task
 from marginalia.db.session import session_scope
+from marginalia.repositories import tasks as tasks_repo
 from marginalia.tasks.kinds import KIND_RECOVER_STUCK_TASKS, task_handler
 
 log = logging.getLogger(__name__)
@@ -43,15 +41,7 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
     cutoff = now
 
     async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(Task).where(
-                    Task.status == "running",
-                    Task.lease_expires_at.isnot(None),
-                    Task.lease_expires_at < cutoff,
-                )
-            )
-        ).scalars().all()
+        rows = await tasks_repo.list_stale_running(session, now=cutoff)
 
         recovered = 0
         marked_dead = 0
@@ -59,16 +49,11 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
             previous_locked = t.locked_by
             previous_lease = t.lease_expires_at
             if t.attempts >= t.max_attempts:
-                await session.execute(
-                    update(Task)
-                    .where(Task.id == t.id, Task.status == "running")
-                    .values(
-                        status="dead",
-                        last_error="recover_stuck_tasks: lease expired beyond max_attempts",
-                        finished_at=now,
-                        locked_by=None,
-                        lease_expires_at=None,
-                    )
+                await tasks_repo.mark_running_dead(
+                    session,
+                    task_id=t.id,
+                    now=now,
+                    error="recover_stuck_tasks: lease expired beyond max_attempts",
                 )
                 await AuditEvent.append(
                     session,
@@ -87,15 +72,8 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
                 )
                 marked_dead += 1
             else:
-                await session.execute(
-                    update(Task)
-                    .where(Task.id == t.id, Task.status == "running")
-                    .values(
-                        status="pending",
-                        locked_by=None,
-                        lease_expires_at=None,
-                        scheduled_at=now,
-                    )
+                await tasks_repo.revive_running_to_pending(
+                    session, task_id=t.id, now=now,
                 )
                 await AuditEvent.append(
                     session,
