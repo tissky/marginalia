@@ -306,6 +306,9 @@ def main() -> int:
     if argv and argv[0] == "init":
         from marginalia.cli.init_cmd import cmd_init_main
         return cmd_init_main(argv[1:])
+    if argv and argv[0] == "storage":
+        from marginalia.cli.storage_cmd import cmd_storage_main
+        return cmd_storage_main(argv[1:])
 
     parser = argparse.ArgumentParser(
         prog="marginalia",

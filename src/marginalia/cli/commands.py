@@ -194,6 +194,30 @@ async def cmd_upload(ctx: CliContext, args: str) -> None:
             return
 
     full_remote = _resolve_remote(ctx, remote)
+
+    # In mirror mode, reject local paths that already live inside the
+    # vault — those should go through /ingest, which adopts in place.
+    # Without this, /upload would re-write the bytes (collision-renaming
+    # the existing on-disk file).
+    from marginalia.config import get_settings
+    from marginalia.storage import MirrorStorage, get_storage
+    storage = get_storage()
+    if isinstance(storage, MirrorStorage):
+        from pathlib import Path as _P
+        vault_root = _P(get_settings().mirror_vault_root).resolve()
+        try:
+            _P(local).resolve().relative_to(vault_root)
+        except ValueError:
+            pass  # outside vault → fine, proceed
+        else:
+            print(
+                f"{local!r} is inside the vault.\n"
+                f"  → /upload is for copying files INTO the vault. "
+                f"Use /ingest {_P(local).resolve().relative_to(vault_root).as_posix()!r} "
+                f"to register an existing vault file."
+            )
+            return
+
     try:
         out = await ctx.client.upload_file(
             local_path=local,
@@ -615,6 +639,170 @@ async def chat(ctx: CliContext, message: str) -> None:
 
 class _ExitREPL(Exception):
     """Raised by /quit to break out of the REPL loop."""
+
+
+# ---- /check, /sync, /ingest --all, /forget --all-missing -----------------
+
+@command("check")
+async def cmd_check(ctx: CliContext, args: str) -> None:
+    """/check  — diff the mirror vault against db (no writes).
+
+    Walks <vault>, hashes each file, and reports new / missing / moved
+    entries vs the db. Read-only — apply with /sync, /ingest --all, or
+    /forget --all-missing.
+    """
+    report = await _load_scan_report()
+    if report is None:
+        return
+    from marginalia.services.scan import render_report
+    print(render_report(report))
+
+
+@command("sync")
+async def cmd_sync(ctx: CliContext, args: str) -> None:
+    """/sync  — apply ALL detected changes: ingest new, apply moves,
+    forget missing. Confirmation required unless --yes."""
+    report = await _load_scan_report()
+    if report is None:
+        return
+    if report.total_changes == 0:
+        print("nothing to do — vault is in sync with db.")
+        return
+
+    from marginalia.services.scan import render_report
+    print(render_report(report))
+    if "--yes" not in args.split():
+        print(
+            f"\napply {report.total_changes} changes "
+            f"({len(report.new)} ingest, {len(report.moved)} move, "
+            f"{len(report.missing)} forget)? [y/N] ",
+            end="",
+        )
+        try:
+            confirm = input().strip().lower()
+        except EOFError:
+            confirm = ""
+        if confirm not in ("y", "yes"):
+            print("cancelled.")
+            return
+
+    from marginalia.services.sync import (
+        apply_moved, forget_all_missing, ingest_all_new,
+    )
+    ingested = await ingest_all_new(report)
+    moved = await apply_moved(report)
+    forgotten = await forget_all_missing(report)
+    print(
+        f"applied: ingest={len(ingested)} move={moved} forget={forgotten}"
+    )
+
+
+@command("ingest")
+async def cmd_ingest(ctx: CliContext, args: str) -> None:
+    """/ingest <vault_path> | --all  — adopt vault-side files into db.
+
+    Only handles files ALREADY inside the vault directory (mirror mode).
+    For copying a file into the vault from somewhere else on disk, use
+    /upload — that one writes the file then ingests in one step.
+
+    /ingest <path>     adopt a single vault-relative or absolute path
+                       that lives inside the vault
+    /ingest --all      adopt everything /check categorises as `new`
+    """
+    from pathlib import Path
+    from marginalia.config import get_settings
+    from marginalia.storage import MirrorStorage, get_storage
+
+    storage = get_storage()
+    if not isinstance(storage, MirrorStorage):
+        print(
+            "/ingest only works with STORAGE_BACKEND=mirror.\n"
+            "(local backend keeps files at UUID paths; nothing for the "
+            "user to drop into a vault.)"
+        )
+        return
+
+    parts = args.split()
+    if not parts:
+        print(
+            "usage: /ingest <vault_path>   adopt a single vault-side file\n"
+            "       /ingest --all          adopt every disk-side new file\n"
+            "  copy a file from outside the vault → /upload"
+        )
+        return
+
+    vault_root = Path(get_settings().mirror_vault_root).resolve()
+    if "--all" in parts:
+        report = await _load_scan_report()
+        if report is None or not report.new:
+            print("no new files on disk.")
+            return
+        from marginalia.services.sync import ingest_all_new
+        out = await ingest_all_new(report)
+        print(f"ingested {len(out)} new files.")
+        return
+
+    target_arg = parts[0]
+    target = Path(target_arg)
+    if not target.is_absolute():
+        target = (vault_root / target_arg).resolve()
+    else:
+        target = target.resolve()
+    try:
+        target.relative_to(vault_root)
+    except ValueError:
+        print(
+            f"{target_arg!r} is outside the vault ({vault_root}).\n"
+            f"  → use /upload <local> <remote> to copy a file into the vault."
+        )
+        return
+    if not target.is_file():
+        print(f"not a file: {target}")
+        return
+
+    from marginalia.services.sync import adopt_disk_file
+    eid = await adopt_disk_file(target, vault_root)
+    if eid is None:
+        print(f"failed to ingest {target}")
+        return
+    print(f"ingested {target.relative_to(vault_root)} → entry={eid[:8]}")
+
+
+@command("forget")
+async def cmd_forget(ctx: CliContext, args: str) -> None:
+    """/forget --all-missing  — soft-delete every entry whose disk file
+    is gone. /forget <entry_id> is /delete in the existing CLI."""
+    if "--all-missing" not in args.split():
+        print("usage: /forget --all-missing  (per-entry: /delete)")
+        return
+    report = await _load_scan_report()
+    if report is None:
+        return
+    if not report.missing:
+        print("nothing missing.")
+        return
+    from marginalia.services.sync import forget_all_missing
+    n = await forget_all_missing(report)
+    print(f"soft-deleted {n} entries.")
+
+
+async def _load_scan_report():
+    """Resolve vault root, walk it, return ScanReport. Mirror-only."""
+    from marginalia.config import get_settings
+    from marginalia.services.scan import scan_vault
+    from marginalia.storage import MirrorStorage, get_storage
+    from pathlib import Path
+
+    storage = get_storage()
+    if not isinstance(storage, MirrorStorage):
+        print(
+            "/check + /sync only work with STORAGE_BACKEND=mirror.\n"
+            "(local backend keeps files at UUID paths — there's nothing "
+            "for the user to scan in Finder.)"
+        )
+        return None
+    settings = get_settings()
+    return await scan_vault(Path(settings.mirror_vault_root))
 
 
 async def dispatch(ctx: CliContext, line: str) -> None:

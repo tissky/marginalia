@@ -165,6 +165,41 @@ async def _main() -> None:
         assert e.deleted_at is not None, "deleted_at should be set"
     print(f"[6] soft delete leaves disk file in place")
 
+    # 7. Rename moves the on-disk file too.
+    from marginalia.services.entries import rename_entry, move_entry
+    async with factory() as s:
+        await rename_entry(s, entry_id=r4["entry_id"],
+                           new_name="Q3 final.pdf")
+        await s.commit()
+    renamed = _VAULT / "reports" / "2026" / "Q3 final.pdf"
+    assert renamed.is_file(), \
+        f"rename should have moved disk file; listing: " + \
+        str(list((_VAULT / "reports" / "2026").iterdir()))
+    assert not sanitized.is_file(), \
+        f"old path {sanitized} still present after rename"
+    print(f"[7] rename moves disk file: 'Q3 report_ draft.pdf' → 'Q3 final.pdf'")
+
+    # 8. Move-to-different-folder relocates disk file.
+    from marginalia.services.folders import resolve_or_create_folder
+    async with factory() as s:
+        new_folder = await resolve_or_create_folder(
+            s, segments=["archive", "old"]
+        )
+        await s.commit()
+        moved_entry = await s.get(FileEntry, r4["entry_id"])
+        assert moved_entry is not None
+    async with factory() as s:
+        await move_entry(s, entry_id=r4["entry_id"],
+                         new_folder_id=new_folder.id)
+        await s.commit()
+    moved_disk = _VAULT / "archive" / "old" / "Q3 final.pdf"
+    assert moved_disk.is_file(), \
+        f"move should have relocated disk file; listing: " + \
+        str(list(_VAULT.rglob("*Q3*")))
+    assert not renamed.is_file(), \
+        f"old folder path {renamed} still present after move"
+    print(f"[8] move relocates disk file across folders")
+
     print("\nALL MIRROR E2E CHECKS PASSED")
 
 

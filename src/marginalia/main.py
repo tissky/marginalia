@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    await _check_storage_consistency(settings)
     runner: TaskRunner | None = None
     if settings.worker_enabled:
         runner = TaskRunner(settings)
@@ -36,6 +37,57 @@ async def lifespan(app: FastAPI):
         if runner is not None:
             await runner.stop()
         await dispose_engine()
+
+
+async def _check_storage_consistency(settings) -> None:
+    """Detect when STORAGE_BACKEND was switched without migrating
+    existing files. UUID-shaped storage_keys imply local; relative
+    paths with slashes imply mirror — mixing them silently breaks.
+
+    Raises StorageBackendMismatchError on conflict; the error message
+    points the user at `marginalia storage migrate`.
+    """
+    from sqlalchemy import select
+    from marginalia.db.engine import get_session_factory
+    from marginalia.db.models import File
+
+    factory = get_session_factory()
+    async with factory() as s:
+        sample = (
+            await s.execute(
+                select(File.storage_key)
+                .where(File.deleted_at.is_(None))
+                .limit(5)
+            )
+        ).scalars().all()
+    if not sample:
+        return  # empty db, nothing to check
+
+    looks_uuid = lambda k: (
+        len(k) == 36 and k.count("-") == 4
+        or len(k.replace("/", "")) == 32
+    )
+    backend = settings.storage_backend
+    for k in sample:
+        is_uuid = looks_uuid(k)
+        if backend == "mirror" and is_uuid:
+            raise StorageBackendMismatchError(
+                f"STORAGE_BACKEND=mirror but existing files reference "
+                f"UUID storage keys (e.g. {k!r}). Either revert "
+                f"STORAGE_BACKEND=local, or run:\n"
+                f"  marginalia storage migrate --from local --to mirror"
+            )
+        if backend == "local" and not is_uuid and "/" in k:
+            raise StorageBackendMismatchError(
+                f"STORAGE_BACKEND=local but existing files reference "
+                f"path-shaped storage keys (e.g. {k!r}). Either revert "
+                f"STORAGE_BACKEND=mirror, or run:\n"
+                f"  marginalia storage migrate --from mirror --to local"
+            )
+
+
+class StorageBackendMismatchError(RuntimeError):
+    pass
 
 
 app = FastAPI(title="Marginalia", lifespan=lifespan)

@@ -26,7 +26,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import FileEntry, Folder
+from marginalia.db.models import File, FileEntry, Folder
 from marginalia.services.audit import write_event
 from marginalia.services.upload import (
     DEFAULT_ON_CONFLICT,
@@ -34,6 +34,7 @@ from marginalia.services.upload import (
     _existing_entry_with_name,
     _resolve_display_name,
 )
+from marginalia.storage import MirrorStorage, get_storage
 
 
 _USER_LIFECYCLE_TARGETS = {
@@ -58,6 +59,56 @@ async def _get_live_entry(db: AsyncSession, entry_id: str) -> FileEntry:
     if e is None or e.deleted_at is not None:
         raise EntryNotFoundError(entry_id)
     return e
+
+
+async def _mirror_sync_disk_path(
+    db: AsyncSession, entry: FileEntry, *, reason: str,
+) -> None:
+    """If storage is mirror, move the on-disk file to match the entry's
+    new (folder, display_name). No-op for local + s3 backends.
+
+    The entry must already have its new folder_id / display_name set.
+    On any failure we raise — caller's session rollback un-does the
+    db change so disk and db stay consistent.
+    """
+    storage = get_storage()
+    if not isinstance(storage, MirrorStorage):
+        return
+    file_row = await db.get(File, entry.file_id)
+    if file_row is None or file_row.deleted_at is not None:
+        return
+    folder_path = await _build_folder_display_path(db, entry.folder_id)
+    new_rel = (
+        f"{folder_path}/{entry.display_name}".lstrip("/")
+        if folder_path else entry.display_name
+    )
+    new_key = await storage.rename(file_row.storage_key, new_rel)
+    if new_key != file_row.storage_key:
+        file_row.storage_key = new_key
+        file_row.updated_at = _utcnow()
+
+
+async def _build_folder_display_path(
+    db: AsyncSession, folder_id: str | None,
+) -> str:
+    """Walk Folder.parent_id to build '/research/llm' style display path.
+    Empty string for the root folder (folder_id None or root sentinel)."""
+    if folder_id is None:
+        return ""
+    parts: list[str] = []
+    cur_id: str | None = folder_id
+    seen: set[str] = set()
+    while cur_id and cur_id not in seen:
+        seen.add(cur_id)
+        f = await db.get(Folder, cur_id)
+        if f is None or f.parent_id is None:
+            # root folder is sentinel; skip its name (typically empty)
+            if f is not None and f.name:
+                parts.append(f.name)
+            break
+        parts.append(f.name)
+        cur_id = f.parent_id
+    return "/" + "/".join(reversed(parts)) if parts else ""
 
 
 async def rename_entry(
@@ -99,6 +150,7 @@ async def rename_entry(
     old_name = entry.display_name
     entry.display_name = final
     entry.updated_at = _utcnow()
+    await _mirror_sync_disk_path(db, entry, reason="rename")
     await write_event(db, kind="entry_renamed", payload={
         "entry_id": entry.id,
         "folder_id": entry.folder_id,
@@ -151,6 +203,7 @@ async def move_entry(
     entry.folder_id = new_folder_id
     entry.display_name = final
     entry.updated_at = _utcnow()
+    await _mirror_sync_disk_path(db, entry, reason="move")
     await write_event(db, kind="entry_moved", payload={
         "entry_id": entry.id,
         "old_folder_id": old_folder,
