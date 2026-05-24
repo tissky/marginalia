@@ -6,11 +6,13 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
   1. Open one conversation row (turn_index = next). Yield "conversation".
   2. Plan phase: yield "planning", do ONE LLM call with `tools=[]`,
      yield "plan" with full plan_text. Stored in conversations.llm_calls
-     under phase='plan'.
+     under phase='plan'. If plan_text starts with `NO_PLAN:` the trailing
+     answer is treated as the final answer and execute is skipped.
   3. Execute phase: up to MAX_EXECUTE_TURNS = 15 LLM calls. For each:
          - yield "thinking", LLM call (records usage)
          - if model returned tool_calls: yield "tool_call" per call,
-           dispatch, yield "tool_result", feed back as `tool` message
+           dispatch (with dedup + doom-loop guards), yield "tool_result",
+           feed back as `tool` message
          - if model returned text + no tool_calls AND stop_reason='end_turn':
            yield "answer" with final text
      Starting at turn 11 (>= EXECUTE_NUDGE_FROM), append wrap-up tail.
@@ -18,6 +20,14 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
      text and mark truncated=True.
   5. Finalize: write agent_response, ended_at; enqueue reflect_turn task
      (priority 30); record task_outcome; yield "done" with usage JSON.
+
+Guards (added 2026-05-24, all append-only — never mutate prior messages
+so ephemeral cache breakpoints stay valid):
+  - NO_PLAN fast-path: planner can opt out of execute for trivial turns.
+  - Tool-call dedup: identical (name, args) within one turn returns the
+    prior result synthetically without re-dispatching.
+  - Doom-loop guard: if the same (name, args) appears K times in the last
+    N tool calls, the next tool result message gets a STOP nudge appended.
 
 Concurrency: this runtime assumes one in-flight turn per session. The API
 layer should serialise per-session turns or the conversation rows will
@@ -28,10 +38,10 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from collections import deque
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from sqlalchemy import select
 
@@ -65,9 +75,63 @@ PLAN_MAX_TOKENS = 1024
 EXECUTE_MAX_TOKENS = 2048
 TOOL_RESULT_PREVIEW_LEN = 240
 
+NO_PLAN_PREFIX = "NO_PLAN:"
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+# Doom-loop: if the same (name, canonical_args) shows up
+# DOOM_LOOP_THRESHOLD times within the last DOOM_LOOP_WINDOW tool calls,
+# inject a STOP nudge. The threshold is one above the dedup floor — dedup
+# already neutralises duplicate work, so this fires only on near-duplicate
+# patterns the model is iterating on (slightly different args each time).
+DOOM_LOOP_WINDOW = 6
+DOOM_LOOP_THRESHOLD = 3
+DOOM_LOOP_NUDGE = (
+    "[runtime guard] 你最近反复在用相似参数调用同一个工具，可能陷入循环。"
+    "请停止扩展工具调用，基于已有结果直接给出最终回答。"
+)
+
+
+def _canonical_args(arguments: Any) -> str:
+    """Stable JSON serialisation of tool arguments for dedup keying.
+
+    `sort_keys=True` so {a:1,b:2} and {b:2,a:1} hash identical; we accept
+    that nested-dict ordering still collapses correctly because json.dumps
+    recursively sorts. None-valued fields keep their slot — different from
+    "field absent" — to avoid false dedup of intentionally-distinct calls.
+    """
+    try:
+        return json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return repr(arguments)
+
+
+@dataclass(slots=True)
+class _CallGuard:
+    """Per-turn tracker for dedup + doom-loop detection."""
+    seen: dict[str, str] = field(default_factory=dict)  # key -> prior result_text
+    recent: deque[str] = field(default_factory=lambda: deque(maxlen=DOOM_LOOP_WINDOW))
+    nudged: bool = False
+
+    def key(self, name: str, arguments: Any) -> str:
+        return f"{name}::{_canonical_args(arguments)}"
+
+    def remember(self, key: str, result_text: str) -> None:
+        self.seen[key] = result_text
+        self.recent.append(key)
+
+    def is_duplicate(self, key: str) -> bool:
+        return key in self.seen
+
+    def should_nudge(self, key: str) -> bool:
+        """True the *first* time the loop pattern crosses threshold.
+
+        We count `key` in the rolling window but don't include the current
+        call yet (caller decides whether to record it). Once nudged, never
+        nudges again in the same turn — one warning is enough; piling on
+        wastes tokens and pollutes the next prefix-cache hit.
+        """
+        if self.nudged:
+            return False
+        return self.recent.count(key) + 1 >= DOOM_LOOP_THRESHOLD
 
 
 @dataclass(slots=True)
@@ -126,16 +190,24 @@ async def run_turn(
     yield AgentEvent(event_type="plan", data=plan_text)
 
     outcome = _ExecuteOutcome()
-    async for ev in _run_execute_phase(
-        chat=chat,
-        system_prompt=system_prompt,
-        plan_text=plan_text,
-        user_message=user_message,
-        conversation_id=conversation_id,
-        session_id=session_id,
-        outcome=outcome,
-    ):
-        yield ev
+    no_plan_answer = _extract_no_plan_answer(plan_text)
+    if no_plan_answer is not None:
+        # Planner declared the user's turn is trivial — skip execute,
+        # still emit one fake "thinking" so the SSE stream shape stays
+        # consistent for clients, and an "answer" with the planner's text.
+        outcome.answer = no_plan_answer
+        yield AgentEvent(event_type="answer", data=no_plan_answer)
+    else:
+        async for ev in _run_execute_phase(
+            chat=chat,
+            system_prompt=system_prompt,
+            plan_text=plan_text,
+            user_message=user_message,
+            conversation_id=conversation_id,
+            session_id=session_id,
+            outcome=outcome,
+        ):
+            yield ev
 
     async with session_scope() as db:
         await session_service.finalize_conversation(
@@ -188,6 +260,24 @@ async def run_turn(
 
 
 # ---- plan -----------------------------------------------------------------
+
+def _extract_no_plan_answer(plan_text: str) -> str | None:
+    """Return the trailing answer if `plan_text` is a NO_PLAN fast-path.
+
+    Tolerates leading whitespace and any minor formatting the model puts
+    around the marker. Returns None if this is a normal plan (the common
+    path), so the caller falls through to execute.
+    """
+    if not plan_text:
+        return None
+    stripped = plan_text.lstrip()
+    if not stripped.startswith(NO_PLAN_PREFIX):
+        return None
+    answer = stripped[len(NO_PLAN_PREFIX):].strip()
+    # Empty answer body is treated as a non-decision — fall back to execute
+    # rather than returning a blank response to the user.
+    return answer or None
+
 
 async def _run_plan_phase(
     *,
@@ -246,6 +336,7 @@ async def _run_execute_phase(
     """
     tool_defs = all_tool_defs()
     ctx = ToolContext(session_id=session_id, conversation_id=conversation_id)
+    guard = _CallGuard()
 
     messages: list[ChatMessage] = [
         ChatMessage(role="user", content=user_message),
@@ -306,6 +397,7 @@ async def _run_execute_phase(
                 ctx=ctx,
                 conversation_id=conversation_id,
                 result_blocks=tool_result_blocks,
+                guard=guard,
             ):
                 yield ev
             messages.append(ChatMessage(role="tool", content=tool_result_blocks))
@@ -359,6 +451,7 @@ async def _dispatch_tool_calls(
     ctx: ToolContext,
     conversation_id: str,
     result_blocks: list[ToolResultBlock],
+    guard: _CallGuard,
 ) -> AsyncIterator[AgentEvent]:
     """Run each tool inside its own session_scope; record on conversation.
 
@@ -367,7 +460,15 @@ async def _dispatch_tool_calls(
     caller can feed them back to the model in a single tool message —
     avoids an interleaved `AgentEvent | ToolResultBlock` stream the
     caller would have to isinstance-filter.
+
+    Guards (append-only — never edit prior history):
+      - dedup: if (name, args) already ran this turn, synthesize a
+        ToolResultBlock with the prior result_text, skip handler.
+      - doom-loop: if the same key crossed DOOM_LOOP_THRESHOLD in the
+        last DOOM_LOOP_WINDOW dispatched calls, append a STOP nudge
+        ToolResultBlock to *this* tool message.
     """
+    nudge_pending = False
     for tc in tool_calls:
         yield AgentEvent(
             event_type="tool_call",
@@ -376,6 +477,36 @@ async def _dispatch_tool_calls(
                 "arguments": tc.arguments,
             }, ensure_ascii=False),
         )
+
+        key = guard.key(tc.name, tc.arguments)
+
+        # Doom-loop check (counts every *attempted* call, including ones
+        # we are about to dedup — repeatedly attempting the same call is
+        # exactly the loop pattern this guard catches).
+        if guard.should_nudge(key):
+            nudge_pending = True
+            guard.nudged = True
+
+        # Dedup: identical call this turn — synthesize without re-running.
+        if guard.is_duplicate(key):
+            prior = guard.seen[key]
+            guard.recent.append(key)  # record the attempt for doom-loop
+            yield AgentEvent(
+                event_type="tool_result",
+                data=json.dumps({
+                    "name": tc.name, "ok": True, "deduped": True,
+                    "preview": prior[:TOOL_RESULT_PREVIEW_LEN],
+                }, ensure_ascii=False),
+            )
+            result_blocks.append(ToolResultBlock(
+                tool_call_id=tc.id,
+                content=(
+                    "[runtime guard] duplicate call this turn — reusing "
+                    f"prior result.\n{prior}"
+                ),
+            ))
+            continue
+
         reg = get_tool(tc.name)
         started = time.monotonic()
         if reg is None:
@@ -403,6 +534,7 @@ async def _dispatch_tool_calls(
                 content=f"ERROR: {err}",
                 is_error=True,
             ))
+            guard.remember(key, f"ERROR: {err}")
             continue
 
         try:
@@ -434,6 +566,7 @@ async def _dispatch_tool_calls(
                 content=f"ERROR: {exc!r}",
                 is_error=True,
             ))
+            guard.remember(key, f"ERROR: {exc!r}")
             continue
 
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -463,3 +596,19 @@ async def _dispatch_tool_calls(
             tool_call_id=tc.id,
             content=result_text,
         ))
+        guard.remember(key, result_text)
+
+    if nudge_pending and result_blocks:
+        # Decorate the last real tool_result with the STOP nudge. We
+        # cannot append a synthetic ToolResultBlock with a fake
+        # tool_use_id — Anthropic validates ids against prior tool_use
+        # blocks and rejects unknown ones. Appending text to an existing
+        # block's `content` keeps the message valid AND append-only at
+        # the conversation level (we are decorating a block we just
+        # created in this turn — never touching history).
+        last = result_blocks[-1]
+        result_blocks[-1] = ToolResultBlock(
+            tool_call_id=last.tool_call_id,
+            content=f"{last.content}\n\n{DOOM_LOOP_NUDGE}",
+            is_error=last.is_error,
+        )
