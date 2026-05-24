@@ -44,7 +44,7 @@ from sqlalchemy import select
 
 from marginalia.db.models import EntryTag, FileEntry
 from marginalia.db.session import session_scope
-from marginalia.services.task_outcomes import (
+from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
     record_outcome,

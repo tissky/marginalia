@@ -62,7 +62,7 @@ from marginalia.llm import (
     get_chat_client,
 )
 from marginalia.services import sessions as session_service
-from marginalia.services.task_outcomes import record_outcome
+from marginalia.repositories.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import KIND_REFLECT_TURN
 

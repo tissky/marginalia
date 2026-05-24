@@ -47,7 +47,7 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
-from marginalia.services.task_outcomes import has_outcome, record_outcome
+from marginalia.repositories.task_outcomes import has_outcome, record_outcome
 from marginalia.tasks.kinds import task_handler
 from marginalia.utils.ids import new_id
 

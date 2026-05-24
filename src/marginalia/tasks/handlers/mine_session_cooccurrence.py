@@ -45,7 +45,7 @@ from marginalia.db.models import (
 )
 from marginalia.db.session import session_scope
 from marginalia.tasks.handlers._mining_helpers import upsert_relation_pair
-from marginalia.services.task_outcomes import (
+from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
     record_outcome,

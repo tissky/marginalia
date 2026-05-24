@@ -27,7 +27,7 @@ from sqlalchemy import func, select
 from marginalia.db.models import AuditEvent, Conversation, Journal, TaskOutcome
 from marginalia.db.models.tasks import Task
 from marginalia.db.session import session_scope
-from marginalia.services.task_outcomes import (
+from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
     record_outcome,

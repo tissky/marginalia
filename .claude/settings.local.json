@@ -19,7 +19,11 @@
       "Bash(.venv/Scripts/python -c \"from marginalia.services import sync; print\\('ok', sync.adopt_disk_file\\)\")",
       "Bash(.venv/Scripts/python *)",
       "Bash(python *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(docker run *)",
+      "Bash(LLM_DEFAULT_API_KEY=sk-fake docker compose config)"
     ]
   }
 }

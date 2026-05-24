@@ -51,7 +51,7 @@ from marginalia.db.models import (
 )
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
-from marginalia.services.task_outcomes import (
+from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
     GLOBAL_OBJECT_KIND,
     record_outcome,

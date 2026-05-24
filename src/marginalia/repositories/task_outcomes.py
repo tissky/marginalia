@@ -1,24 +1,13 @@
-"""task_outcomes service — design.md §8.4 + §14.3.
+"""task_outcomes repository — design.md §8.4.
 
-Tiny wrapper for INSERT and recency / idempotence queries against the
-`task_outcomes` table. Caller controls the transaction (matches services.audit
-shape).
-
-Conventions:
-  - object_kind / object_id strings are documented per task in the handler
-    module top-of-file. Use 'global' / 'global' for tasks that don't operate
-    on a single object (normalize_tags, prune_*, etc.).
-  - outcome ∈ {'applied', 'noop', 'rejected', 'deferred', 'error'}.
-    'error' = handler tried and failed (LLM 500, partial commit, etc.); use
-    when failure is visible to the user via degraded quality. 'deferred' =
-    handler intentionally postponed work it could have done.
-  - detail is task-specific JSON. Keep keys consistent across handlers so a
-    single ad-hoc query can pull the whole story for an object.
+INSERT-only fact table for "what did task X do to object Y when?".
+Read by infrastructure (idempotence / recency lookups), pruned on a
+30-day rolling window.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

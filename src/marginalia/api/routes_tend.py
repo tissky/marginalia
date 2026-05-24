@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from marginalia.db.models import AuditEvent, Task
 from marginalia.db.models.task_outcomes import TaskOutcome
 from marginalia.db.session import get_session
-from marginalia.services.task_outcomes import record_outcome
+from marginalia.repositories.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import (
     KIND_MINE_RELATIONS,
