@@ -146,7 +146,7 @@ def _install_fake() -> None:
     fake = _FakeIngest()
     def _factory(profile: str = "ingest"):
         return fake
-    import marginalia.pipelines.container as cmod
+    import marginalia.pipelines.archive as cmod
     cmod.get_chat_client = _factory  # type: ignore[assignment]
 
 

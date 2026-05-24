@@ -209,11 +209,17 @@ async def main():
     assert len(image_blocks) == 1
 
     img = image_blocks[0]
-    assert img.media_type == "image/png", f"bad media_type: {img.media_type}"
+    # The pipeline now down-scales + re-encodes everything as JPEG before
+    # sending to the VLM (bounded long edge, predictable size). The
+    # post-rescale bytes are no longer byte-equal to the upload, but the
+    # media_type should always be image/jpeg and the data should decode.
+    assert img.media_type == "image/jpeg", \
+        f"bad media_type: {img.media_type}"
 
     decoded = base64.b64decode(img.data_b64)
-    assert decoded == PNG_BYTES, "image bytes survived roundtrip mismatched"
-    print("[image] bytes roundtrip OK; len =", len(decoded))
+    assert decoded.startswith(b"\xff\xd8\xff"), \
+        "expected JPEG magic header after rescale"
+    print("[image] post-rescale JPEG OK; len =", len(decoded))
 
     # ---- 3. DB-level: file content fields written ------------------------
     factory = get_session_factory()
