@@ -173,25 +173,18 @@ async def cmd_tree(ctx: CliContext, args: str) -> None:
 
 @command("upload")
 async def cmd_upload(ctx: CliContext, args: str) -> None:
-    """/upload <local_path> <remote_path>  — upload a single file."""
+    """/upload <local_path> <remote_path>  — upload a single file.
+
+    remote_path:
+      - trailing '/'         folder; display_name = local basename
+      - includes a '.' (ext) folder + filename (display_name = last segment)
+    Quote any path containing spaces (both local and remote)."""
     local, remote = _split_first(args)
     if not local or not remote:
-        print("usage: /upload <local_path> <remote_path>")
-        print("  remote_path: trailing '/' = folder; with extension = filename;")
-        print("  ambiguous (no ext, no '/') needs --name <display_name>")
+        print('usage: /upload <local_path> <remote_path>')
+        print('  remote_path: trailing "/" = folder; with extension = filename')
+        print('  quote paths with spaces:  /upload "~/My docs/x.pdf" "/papers/Y Z.pdf"')
         return
-
-    display_name: str | None = None
-    if "--name" in remote:
-        # crude parse: split off --name <value>
-        bits = remote.split()
-        try:
-            i = bits.index("--name")
-            display_name = bits[i + 1]
-            remote = " ".join(bits[:i] + bits[i + 2:])
-        except (ValueError, IndexError):
-            print("bad --name flag")
-            return
 
     full_remote = _resolve_remote(ctx, remote)
 
@@ -222,7 +215,6 @@ async def cmd_upload(ctx: CliContext, args: str) -> None:
         out = await ctx.client.upload_file(
             local_path=local,
             remote_path=full_remote,
-            display_name=display_name,
             on_conflict=ctx.on_conflict,
         )
     except CliHttpError as e:
