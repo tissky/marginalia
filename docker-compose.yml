@@ -1,0 +1,122 @@
+# syntax=docker/compose-spec:1.0
+# Marginalia dev stack: api + worker + Postgres + MinIO.
+#
+# Bring up:    docker compose up -d
+# Logs:        docker compose logs -f api worker
+# Reset:       docker compose down -v   # drops volumes (postgres, minio, /data)
+#
+# .env (next to this file) must define LLM_DEFAULT_API_KEY at minimum.
+# Other LLM_* overrides are read by Settings via env passthrough.
+
+name: marginalia
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: marginalia
+      POSTGRES_PASSWORD: marginalia
+      POSTGRES_DB: marginalia
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marginalia -d marginalia"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9001:9001"  # web console (optional, useful for poking around)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: creates the bucket on first boot, then exits 0.
+  # Idempotent — `mb --ignore-existing` is a noop on subsequent runs.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/marginalia &&
+      echo 'bucket ready'
+      "
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: marginalia:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MARGINALIA_HOME: /data
+      DB_BACKEND: postgres
+      POSTGRES_DSN: postgresql+asyncpg://marginalia:marginalia@postgres:5432/marginalia
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: marginalia
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      # Worker runs as its own service; disable the in-process runner.
+      WORKER_ENABLED: "false"
+      # LLM credentials come from .env — never bake them into the image.
+      LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-openai}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-gpt-4o-mini}
+      LLM_DEFAULT_API_KEY: ${LLM_DEFAULT_API_KEY:?set LLM_DEFAULT_API_KEY in .env}
+      LLM_DEFAULT_BASE_URL: ${LLM_DEFAULT_BASE_URL:-}
+    volumes:
+      - margdata:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    image: marginalia:dev
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["marginalia-worker", "--log-level", "INFO"]
+    environment:
+      MARGINALIA_HOME: /data
+      DB_BACKEND: postgres
+      POSTGRES_DSN: postgresql+asyncpg://marginalia:marginalia@postgres:5432/marginalia
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: marginalia
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-openai}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-gpt-4o-mini}
+      LLM_DEFAULT_API_KEY: ${LLM_DEFAULT_API_KEY:?set LLM_DEFAULT_API_KEY in .env}
+      LLM_DEFAULT_BASE_URL: ${LLM_DEFAULT_BASE_URL:-}
+    volumes:
+      - margdata:/data
+
+volumes:
+  pgdata:
+  miniodata:
+  margdata:

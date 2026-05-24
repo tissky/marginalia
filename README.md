@@ -250,6 +250,21 @@ marginalia --server http://server.lan:8000
 MARGINALIA_SERVER=http://server.lan:8000
 ```
 
+### Docker
+
+For a server-mode deployment with Postgres + S3-compatible storage,
+`docker-compose.yml` brings up api + worker + Postgres + MinIO:
+
+```bash
+echo "LLM_DEFAULT_API_KEY=sk-..." > .env
+docker compose up -d
+marginalia --server http://localhost:8000
+```
+
+Compose runs `alembic upgrade head` on api startup and creates the MinIO
+bucket via a one-shot init container. Volumes (`pgdata`, `miniodata`,
+`margdata`) persist across restarts.
+
 ## Development
 
 ```bash

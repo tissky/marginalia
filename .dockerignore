@@ -1,0 +1,52 @@
+# Build context excludes — keep the image small and avoid leaking local state.
+.git
+.gitignore
+.gitattributes
+.github
+.venv
+venv
+env
+.env
+.env.*
+!/.env.example
+
+# Python build/runtime caches
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+build
+dist
+
+# Tooling / IDE
+.idea
+.vscode
+.claude
+
+# Test fixtures (the *_e2e_data dirs are recreated per-run anyway)
+tests/_*_e2e_data
+tests/__pycache__
+
+# Local databases / object stores accidentally checked into the working dir
+*.db
+*.sqlite
+*.sqlite3
+objects/
+library/
+
+# Logs / scratch
+*.log
+.DS_Store
+Thumbs.db
+
+# Compose / docs (README.md is needed by hatchling during pip install)
+docker-compose.yml
+docker-compose.*.yml
+LICENSE
+
+# Plans/specs that don't belong in the runtime image
+plans
+specs
