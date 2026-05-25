@@ -213,12 +213,18 @@ async def run_turn(
             conversation_id=conversation_id,
             agent_response=outcome.answer,
         )
-        await enqueue(
-            db,
-            kind=KIND_REFLECT_TURN,
-            payload={"conversation_id": conversation_id},
-            dedup_key=f"reflect_turn:{conversation_id}",
-        )
+        # NO_PLAN turns are trivial by definition (greetings, "thanks",
+        # tiny pleasantries the planner answered directly with zero tool
+        # calls). Reflecting them produces noisy journal entries that
+        # crowd out real investigations and burn one reflect-LLM call per
+        # turn for no signal. Skip the enqueue and mark the outcome.
+        if no_plan_answer is None:
+            await enqueue(
+                db,
+                kind=KIND_REFLECT_TURN,
+                payload={"conversation_id": conversation_id},
+                dedup_key=f"reflect_turn:{conversation_id}",
+            )
         await record_outcome(
             db,
             task_kind="run_turn",
@@ -229,6 +235,7 @@ async def run_turn(
                 "turn_index": turn_index,
                 "session_id": session_id,
                 "truncated": outcome.truncated,
+                "no_plan": no_plan_answer is not None,
             },
         )
         conv = await session_service.get_conversation(db, conversation_id)
