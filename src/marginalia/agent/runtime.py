@@ -101,6 +101,7 @@ log = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_LEN = 50_000
 QUICK_EXECUTE_MAX_TURNS = 4
+QUICK_FORCED_ANSWER_RETRIES = 1
 # Structured-truncation safety net: how many trim passes before falling
 # back to string slicing. Practically each pass halves one large list, so
 # 3 passes can absorb three different oversize lists in one payload.
@@ -132,6 +133,14 @@ FINAL_ANSWER_CONTINUE_NUDGE = (
     "[runtime guard] Your previous final answer was cut off by the token "
     "limit. Continue exactly where it stopped. Do not restart, do not repeat "
     "previous text, do not call tools, and finish the answer."
+)
+QUICK_FORCED_ANSWER_NUDGE = (
+    "[runtime guard] Your previous response attempted a tool call, but Quick "
+    "mode has reached the final answer round and tools are unavailable. "
+    "Do not call tools. Do not emit DSML, XML, JSON, or pseudo function-call "
+    "markup. Write the final answer now from the evidence already collected. "
+    "If evidence is incomplete, state the missing piece and give the best "
+    "bounded answer."
 )
 
 
@@ -916,20 +925,28 @@ async def _run_execute_phase(
         0 if quick_mode else max(0, settings.agent_final_answer_continue_turns)
     )
     max_final_chars = max(0, settings.agent_final_answer_max_chars)
-    max_total_turns = max_execute_turns + max_final_continuations
+    max_total_turns = max_execute_turns + max_final_continuations + (
+        QUICK_FORCED_ANSWER_RETRIES if quick_mode else 0
+    )
 
     last_text: str | None = None
     final_parts: list[str] = []
     final_continuations = 0
     continuing_final_answer = False
+    quick_forced_answer_retries = 0
+    quick_forced_answer_active = False
 
     for turn in range(max_total_turns):
-        if turn >= max_execute_turns and not continuing_final_answer:
+        if (
+            turn >= max_execute_turns
+            and not continuing_final_answer
+            and not quick_forced_answer_active
+        ):
             break
         force_final_answer = (
             quick_mode
             and not continuing_final_answer
-            and turn >= max_execute_turns - 1
+            and (turn >= max_execute_turns - 1 or quick_forced_answer_active)
         )
 
         budget_tail = (
@@ -950,11 +967,13 @@ async def _run_execute_phase(
         yield AgentEvent(
             event_type="thinking",
             data=json.dumps({
-                "round": turn + 1,
+                "round": max_execute_turns
+                if quick_forced_answer_active else turn + 1,
                 "limit": max_execute_turns,
                 "final_continuation": continuing_final_answer,
                 "mode": options.mode,
                 "force_final_answer": force_final_answer,
+                "forced_answer_retry": quick_forced_answer_active,
             }, ensure_ascii=False),
         )
 
@@ -1008,6 +1027,17 @@ async def _run_execute_phase(
                     data=await _rewrite_footnotes_for_display(answer),
                 )
                 return
+            if (
+                quick_mode
+                and quick_forced_answer_retries < QUICK_FORCED_ANSWER_RETRIES
+            ):
+                quick_forced_answer_retries += 1
+                quick_forced_answer_active = True
+                messages.append(ChatMessage(
+                    role="user",
+                    content=QUICK_FORCED_ANSWER_NUDGE,
+                ))
+                continue
             outcome.truncated = True
             if options.mode == "quick" and _prefers_zh(user_message):
                 answer = (

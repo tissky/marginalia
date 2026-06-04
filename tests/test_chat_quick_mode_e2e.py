@@ -218,3 +218,112 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
     assert done["tool_calls"] == 3
     assert done["truncated"] is False
     assert done["mode"] == "quick"
+
+
+async def test_quick_mode_repairs_tool_call_on_final_answer_round() -> None:
+    tool = _CountingTool()
+    _install_tool(tool)
+    chat = _ScriptedChat([
+        ChatResponse(
+            text="Find evidence, then answer.",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=100, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(id="call_1", name=tool.name, arguments={"q": "one"})
+            ],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=150, output_tokens=25),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(id="call_2", name=tool.name, arguments={"q": "two"})
+            ],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=180, output_tokens=25),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(id="call_3", name=tool.name, arguments={"q": "three"})
+            ],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=190, output_tokens=25),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(id="call_4", name=tool.name, arguments={"q": "too-late"})
+            ],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=200, output_tokens=25),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="Forced quick answer from collected evidence.",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=220, output_tokens=30),
+            parsed_json=None,
+        ),
+    ])
+    _install_chat(chat)
+
+    transport = ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            created = await c.post(
+                "/v1/sessions",
+                json={"initiating_user_message": "quick retry test"},
+            )
+            assert created.status_code == 201, created.text
+            session_id = created.json()["session_id"]
+
+            events = await _consume_sse(
+                c,
+                f"/v1/chat/{session_id}",
+                json_body={"query": "answer quickly", "mode": "quick"},
+            )
+
+    seq = [event["event"] for event in events]
+    assert seq.count("thinking") == 5, seq
+    assert seq.count("tool_call") == 3, seq
+    assert seq.count("tool_result") == 3, seq
+    assert seq.count("answer") == 1, seq
+    assert tool.call_count == 3
+
+    thinking = [
+        json.loads(event["data"])
+        for event in events
+        if event["event"] == "thinking"
+    ]
+    assert [item["round"] for item in thinking] == [1, 2, 3, 4, 4]
+    assert [item["limit"] for item in thinking] == [4, 4, 4, 4, 4]
+    assert [item["forced_answer_retry"] for item in thinking] == [
+        False, False, False, False, True,
+    ]
+
+    assert len(chat.requests) == 6
+    assert chat.requests[4].tools is None
+    assert chat.requests[4].tool_choice == "none"
+    assert chat.requests[5].tools is None
+    assert chat.requests[5].tool_choice == "none"
+    assert any(
+        "previous response attempted a tool call" in str(message.content)
+        for message in chat.requests[5].messages
+    )
+
+    answer = next(event["data"] for event in events if event["event"] == "answer")
+    assert "Forced quick answer" in answer
+    done = json.loads(next(event["data"] for event in events if event["event"] == "done"))
+    assert done["llm_calls"] == 6
+    assert done["tool_calls"] == 3
+    assert done["truncated"] is False
