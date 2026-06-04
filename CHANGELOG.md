@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.2 - 2026-06-04
+
+### Added
+
+- Settings UI and API controls for embedding, semantic recall, rerank, and
+  evidence-selection configuration.
+
+### Fixed
+
+- Citation footnotes now hide raw `entry_id`, `quote`, and `reason` metadata
+  in more model output variants, including quoted `entry_id` values and fields
+  emitted in a different order.
+- OpenAI-compatible chat adapters now convert DeepSeek-style DSML text tool
+  calls into real tool calls instead of leaking pseudo-XML into the answer.
+- Quick mode now performs a forced final-answer retry when the capped final
+  turn still tries to call a tool, reducing "no final answer" failures.
+
 ## 0.2.1 - 2026-06-03
 
 ### Added
