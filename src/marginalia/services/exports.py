@@ -24,24 +24,14 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.citations import (
+    iter_citation_footnotes,
+    unescape_citation_quote,
+)
 from marginalia.db.models import Conversation
 from marginalia.repositories import entries as entries_repo
 from marginalia.services.user_files import get_user_metadata
 
-
-_FOOTNOTE_RE = re.compile(
-    r"\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
-    r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
-    r"(?:\s*,\s*(?:"
-    r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
-    r"|page\s*=\s*`?(?:([0-9]+(?:-[0-9]+)?)|(?:N/?A|n/?a|NA|na|none|null|unknown))`?"
-    r"|section_id\s*=\s*`?([^\s,`\-]+)`?"               # group 5: legacy section_id
-    r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated (no capture)
-    r"))*"
-    r"(?:\s+-\s+(.+?))?"                                 # group 6: reason
-    r"\s*$",
-    re.MULTILINE,
-)
 
 _EXPORT_METADATA_KEYS = frozenset({
     "entry_id",
@@ -112,24 +102,20 @@ def parse_citations(agent_response: str) -> list[CitationRef]:
         return []
     cites: list[CitationRef] = []
     seen_markers: set[str] = set()
-    for m in _FOOTNOTE_RE.finditer(agent_response):
-        marker = m.group(1)
-        entry_id = m.group(2).strip()
-        quote_raw = m.group(3)
-        page = m.group(4).strip() if m.group(4) else None
-        section_id = m.group(5).strip() if m.group(5) else None
-        reason = m.group(6).strip() if m.group(6) else None
+    for parsed in iter_citation_footnotes(agent_response):
+        marker = parsed.marker
+        entry_id = parsed.entry_id
         if marker in seen_markers:
             continue
         seen_markers.add(marker)
         quote = (
-            quote_raw.replace(r"\"", '"').replace(r"\\", "\\")
-            if quote_raw is not None
+            unescape_citation_quote(parsed.quote)
+            if parsed.quote is not None
             else None
         )
         cites.append(CitationRef(
-            marker=marker, entry_id=entry_id, section_id=section_id,
-            quote=quote, page=page, reason=reason,
+            marker=marker, entry_id=entry_id, section_id=parsed.section_id,
+            quote=quote, page=parsed.page, reason=parsed.reason,
         ))
     return cites
 

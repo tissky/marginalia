@@ -172,7 +172,8 @@ async def main():
         "section_id=s2 - because it covers election\n"
         "[^b]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1242 - whole doc\n"
         "[^c]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1243, "
-        "quote=\"first quote\" - quoted doc\n"
+        "source=\"search\", quote=\"first quote\", confidence=0.91, "
+        "reason=\"quoted doc\"\n"
         "[^d]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1244, "
         "page=54 - page doc\n"
         "[^e]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1245, "
@@ -192,14 +193,18 @@ async def main():
     assert cites[4].quote == "no page quote"
     assert cites[4].page is None
     assert cites[4].reason == "no page placeholder"
-    non_contract = (
+    tolerant_variants = (
         "[^x]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1245，page=7 - bad\n"
         "[^y]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1246, "
         "quote=\"first\" + \"second\" - bad\n"
         "[^z]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1247, "
         "page=54（p.54） - bad\n"
     )
-    assert parse_citations(non_contract) == []
+    tolerant = parse_citations(tolerant_variants)
+    assert len(tolerant) == 3
+    assert tolerant[0].page == "7"
+    assert tolerant[1].quote == "first"
+    assert tolerant[2].page == "54"
     print("[1] parse_citations OK")
 
     # ---- 2. setup + run export endpoint -------------------------------

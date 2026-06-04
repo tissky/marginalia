@@ -10,10 +10,10 @@ Why a separate file instead of editing `.env`:
   - `.env` is the user's secrets file; we don't want the API to rewrite
     it (lossy on comments, may be checked in).
   - The overlay only carries the small whitelist of fields that make
-    sense to change at runtime — LLM profiles, conflict policy, agent
-    token budgets, worker concurrency, and bounded LLM ingest fan-out.
-    Storage backend, db, and most worker cadence still need a restart
-    and stay in `.env`.
+    sense to change at runtime — LLM profiles, retrieval providers,
+    conflict policy, agent token budgets, worker concurrency, and
+    bounded LLM ingest fan-out. Storage backend, db, and most worker
+    cadence still need a restart and stay in `.env`.
 
 Writes are atomic (tmp + rename). The file is created on first PUT.
 After a successful write, callers must invalidate the
@@ -57,9 +57,30 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     # pipeline consumes the audio profile yet, so accepting writes
     # would just persist dead config that misleads the user when
     # nothing happens. Re-add when a transcription pipeline lands.
+    # Optional semantic recall / rerank
+    "embedding_provider",
+    "embedding_api_key",
+    "embedding_base_url",
+    "embedding_model",
+    "embedding_dimensions",
+    "embedding_batch_size",
+    "semantic_index_backend",
+    "semantic_recall_enabled",
+    "semantic_recall_limit",
+    "rerank_enabled",
+    "rerank_api_key",
+    "rerank_base_url",
+    "rerank_model",
+    "rerank_top_n",
+    "rerank_max_doc_chars",
+    "rerank_concurrency",
+    "evidence_selection",
 })
 
 _VALID_PROVIDERS: frozenset[str] = frozenset({"openai", "openai-compatible", "anthropic"})
+_VALID_EMBEDDING_PROVIDERS: frozenset[str] = frozenset({"dashscope", "openai-compatible"})
+_VALID_SEMANTIC_INDEX_BACKENDS: frozenset[str] = frozenset({"auto", "file", "sqlite-vec"})
+_VALID_EVIDENCE_SELECTION: frozenset[str] = frozenset({"quota", "rerank"})
 _VALID_CONFLICT: frozenset[str] = frozenset({"rename", "error", "skip"})
 
 
@@ -97,7 +118,17 @@ def write_overlay(home: str | os.PathLike[str], values: dict[str, Any]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(values, f, indent=2, ensure_ascii=False, sort_keys=True)
-        os.replace(tmp_name, p)
+        try:
+            os.replace(tmp_name, p)
+        except PermissionError:
+            # Some restricted Windows filesystems allow direct writes but
+            # deny rename/replace. Keep normal deployments atomic, but
+            # still let the settings UI persist in those sandboxes.
+            p.write_text(Path(tmp_name).read_text(encoding="utf-8"), encoding="utf-8")
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -125,12 +156,27 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
         if v == "":
             v = None
         if k.endswith("_provider") and v is not None:
-            if v not in _VALID_PROVIDERS:
-                bad.append(f"{k}: must be one of {sorted(_VALID_PROVIDERS)}")
+            valid = (
+                _VALID_EMBEDDING_PROVIDERS
+                if k == "embedding_provider"
+                else _VALID_PROVIDERS
+            )
+            if v not in valid:
+                bad.append(f"{k}: must be one of {sorted(valid)}")
                 continue
         if k == "default_on_conflict":
             if v not in _VALID_CONFLICT:
                 bad.append(f"{k}: must be one of {sorted(_VALID_CONFLICT)}")
+                continue
+        if k == "semantic_index_backend":
+            if v not in _VALID_SEMANTIC_INDEX_BACKENDS:
+                bad.append(
+                    f"{k}: must be one of {sorted(_VALID_SEMANTIC_INDEX_BACKENDS)}"
+                )
+                continue
+        if k == "evidence_selection":
+            if v not in _VALID_EVIDENCE_SELECTION:
+                bad.append(f"{k}: must be one of {sorted(_VALID_EVIDENCE_SELECTION)}")
                 continue
         if k in (
             "agent_plan_max_tokens",
@@ -143,6 +189,12 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "read_compression_context_chars",
             "llm_ingest_concurrency",
             "worker_batch_size",
+            "embedding_dimensions",
+            "embedding_batch_size",
+            "semantic_recall_limit",
+            "rerank_top_n",
+            "rerank_max_doc_chars",
+            "rerank_concurrency",
         ):
             try:
                 v = int(v)
@@ -154,12 +206,28 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 lower, upper = 3, 100
             elif k in ("llm_ingest_concurrency", "worker_batch_size"):
                 upper = 32
+            elif k == "embedding_dimensions":
+                upper = 8192
+            elif k == "embedding_batch_size":
+                upper = 100
+            elif k == "semantic_recall_limit":
+                upper = 1000
+            elif k == "rerank_top_n":
+                upper = 1000
+            elif k == "rerank_max_doc_chars":
+                upper = 200000
+            elif k == "rerank_concurrency":
+                upper = 64
             else:
                 upper = 200000
             if v < lower or v > upper:
                 bad.append(f"{k}: out of range [{lower}, {upper}]")
                 continue
-        if k == "read_compression_enabled":
+        if k in (
+            "read_compression_enabled",
+            "semantic_recall_enabled",
+            "rerank_enabled",
+        ):
             if isinstance(v, str):
                 v = v.strip().lower() in {"1", "true", "yes", "on"}
             else:

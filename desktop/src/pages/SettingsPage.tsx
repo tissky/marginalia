@@ -1,8 +1,9 @@
-/** Settings page — three sections.
+/** Settings page — four sections.
  *
  *  1. Connection: API base URL (client-side, persisted to localStorage)
  *  2. Preferences: theme, default conflict policy, status-bar polling
- *  3. Server status (read-only) + LLM profile editor (writable overlay)
+ *  3. Retrieval: embedding recall and rerank runtime overlay
+ *  4. Server status (read-only) + LLM profile editor (writable overlay)
  *
  *  Server state (server + llm) lives on the page so Preferences and the
  *  Server-status card stay in lockstep — picking a conflict policy in
@@ -23,25 +24,45 @@ import type { LlmSettings, OnConflict, ServerSettings } from "@/types/api";
 
 const STORAGE_KEY = "marginalia.api_base";
 
+type ServerNumberField =
+  | "agent_plan_max_tokens"
+  | "agent_execute_max_tokens"
+  | "agent_execute_max_turns"
+  | "worker_batch_size"
+  | "llm_ingest_concurrency"
+  | "embedding_dimensions"
+  | "embedding_batch_size"
+  | "semantic_recall_limit"
+  | "rerank_top_n"
+  | "rerank_max_doc_chars"
+  | "rerank_concurrency";
+
+type ServerBooleanField =
+  | "read_compression_enabled"
+  | "semantic_recall_enabled"
+  | "rerank_enabled";
+
+type ServerStringField =
+  | "embedding_provider"
+  | "embedding_base_url"
+  | "embedding_model"
+  | "semantic_index_backend"
+  | "rerank_base_url"
+  | "rerank_model"
+  | "evidence_selection";
+
+type ServerSecretField = "embedding_api_key" | "rerank_api_key";
+
 interface ServerCtx {
   server: ServerSettings | null;
   llm: LlmSettings | null;
   err: string | null;
   setLlm: (next: LlmSettings) => void;
   setDefaultConflict: (v: OnConflict) => Promise<void>;
-  setServerNumber: (
-    field:
-      | "agent_plan_max_tokens"
-      | "agent_execute_max_tokens"
-      | "agent_execute_max_turns"
-      | "worker_batch_size"
-      | "llm_ingest_concurrency",
-    v: number,
-  ) => Promise<void>;
-  setServerBoolean: (
-    field: "read_compression_enabled",
-    v: boolean,
-  ) => Promise<void>;
+  setServerNumber: (field: ServerNumberField, v: number) => Promise<void>;
+  setServerBoolean: (field: ServerBooleanField, v: boolean) => Promise<void>;
+  setServerString: (field: ServerStringField, v: string) => Promise<void>;
+  setServerSecret: (field: ServerSecretField, v: string) => Promise<void>;
 }
 
 export function SettingsPage() {
@@ -54,6 +75,7 @@ export function SettingsPage() {
 
         <ConnectionSection />
         <PreferencesSection ctx={ctx} />
+        <RetrievalSection ctx={ctx} />
         <ServerSection ctx={ctx} />
       </div>
     </div>
@@ -98,18 +120,10 @@ function useServerCtx(): ServerCtx {
     }
   };
 
-  const setServerNumber = async (
-    field:
-      | "agent_plan_max_tokens"
-      | "agent_execute_max_tokens"
-      | "agent_execute_max_turns"
-      | "worker_batch_size"
-      | "llm_ingest_concurrency",
-    v: number,
-  ) => {
+  const setServerNumber = async (field: ServerNumberField, v: number) => {
     if (!server || server[field] === v) return;
     const prev = server;
-    setServer({ ...server, [field]: v });
+    setServer({ ...server, [field]: v } as ServerSettings);
     try {
       await settingsApi.updateLlm({ [field]: v });
     } catch {
@@ -117,15 +131,52 @@ function useServerCtx(): ServerCtx {
     }
   };
 
-  const setServerBoolean = async (
-    field: "read_compression_enabled",
-    v: boolean,
-  ) => {
+  const setServerBoolean = async (field: ServerBooleanField, v: boolean) => {
     if (!server || server[field] === v) return;
     const prev = server;
-    setServer({ ...server, [field]: v });
+    const next: ServerSettings = { ...server, [field]: v };
+    if (field === "semantic_recall_enabled") {
+      next.semantic_recall_configured = v && server.embedding_api_key_set;
+    } else if (field === "rerank_enabled") {
+      next.rerank_configured = v && server.rerank_api_key_set;
+    }
+    setServer(next);
     try {
       await settingsApi.updateLlm({ [field]: v });
+    } catch {
+      setServer(prev);
+    }
+  };
+
+  const setServerString = async (field: ServerStringField, v: string) => {
+    const trimmed = v.trim();
+    if (!server || !trimmed || server[field] === trimmed) return;
+    const prev = server;
+    setServer({ ...server, [field]: trimmed } as ServerSettings);
+    try {
+      await settingsApi.updateLlm({ [field]: trimmed });
+    } catch {
+      setServer(prev);
+    }
+  };
+
+  const setServerSecret = async (field: ServerSecretField, v: string) => {
+    const trimmed = v.trim();
+    if (!server || !trimmed) return;
+    const prev = server;
+    const flag =
+      field === "embedding_api_key"
+        ? "embedding_api_key_set"
+        : "rerank_api_key_set";
+    const next: ServerSettings = { ...server, [flag]: true };
+    if (field === "embedding_api_key") {
+      next.semantic_recall_configured = server.semantic_recall_enabled;
+    } else {
+      next.rerank_configured = server.rerank_enabled;
+    }
+    setServer(next);
+    try {
+      await settingsApi.updateLlm({ [field]: trimmed });
     } catch {
       setServer(prev);
     }
@@ -139,6 +190,8 @@ function useServerCtx(): ServerCtx {
     setDefaultConflict,
     setServerNumber,
     setServerBoolean,
+    setServerString,
+    setServerSecret,
   };
 }
 
@@ -373,6 +426,209 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
   );
 }
 
+// ---- Retrieval ------------------------------------------------------------
+
+function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
+  const {
+    server,
+    setServerBoolean,
+    setServerNumber,
+    setServerString,
+    setServerSecret,
+  } = ctx;
+  const { t } = useI18n();
+
+  if (!server) {
+    return (
+      <Section title={t.settings.retrievalTitle} subtitle={t.settings.retrievalSubtitle}>
+        <p className="text-sm text-fg-subtle">{t.common.loading}</p>
+      </Section>
+    );
+  }
+
+  return (
+    <Section title={t.settings.retrievalTitle} subtitle={t.settings.retrievalSubtitle}>
+      <div className="space-y-6">
+        <div className="space-y-4">
+          <div className="text-xs font-semibold text-fg-muted">
+            {t.settings.embeddingGroup}
+          </div>
+
+          <Row label={t.settings.semanticRecall} hint={t.settings.semanticRecallHint}>
+            <input
+              type="checkbox"
+              checked={server.semantic_recall_enabled}
+              onChange={(e) => setServerBoolean("semantic_recall_enabled", e.target.checked)}
+              className="h-4 w-4 accent-accent"
+            />
+          </Row>
+
+          <Row label={t.settings.embeddingProvider}>
+            <select
+              value={server.embedding_provider}
+              onChange={(e) => setServerString("embedding_provider", e.target.value)}
+              className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            >
+              <option value="openai-compatible">openai-compatible</option>
+              <option value="dashscope">dashscope</option>
+            </select>
+          </Row>
+
+          <Row label={t.settings.embeddingApiKey} hint={t.llm.keepKeyHint}>
+            <SecretInput
+              configured={server.embedding_api_key_set}
+              onCommit={(v) => setServerSecret("embedding_api_key", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.embeddingBaseUrl}>
+            <TextInput
+              value={server.embedding_base_url}
+              className="w-72"
+              onCommit={(v) => setServerString("embedding_base_url", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.embeddingModel}>
+            <TextInput
+              value={server.embedding_model}
+              className="w-48"
+              onCommit={(v) => setServerString("embedding_model", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.embeddingDimensions}>
+            <NumberInput
+              value={server.embedding_dimensions}
+              min={1}
+              max={8192}
+              step={1}
+              className="w-20"
+              onCommit={(v) => setServerNumber("embedding_dimensions", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.embeddingBatchSize}>
+            <NumberInput
+              value={server.embedding_batch_size}
+              min={1}
+              max={100}
+              step={1}
+              className="w-16"
+              onCommit={(v) => setServerNumber("embedding_batch_size", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.semanticRecallLimit}>
+            <NumberInput
+              value={server.semantic_recall_limit}
+              min={1}
+              max={1000}
+              step={1}
+              className="w-20"
+              onCommit={(v) => setServerNumber("semantic_recall_limit", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.semanticIndexBackend}>
+            <select
+              value={server.semantic_index_backend}
+              onChange={(e) => setServerString("semantic_index_backend", e.target.value)}
+              className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            >
+              <option value="auto">auto</option>
+              <option value="file">file</option>
+              <option value="sqlite-vec">sqlite-vec</option>
+            </select>
+          </Row>
+        </div>
+
+        <div className="space-y-4 border-t border-border pt-5">
+          <div className="text-xs font-semibold text-fg-muted">
+            {t.settings.rerankGroup}
+          </div>
+
+          <Row label={t.settings.rerankEnabled} hint={t.settings.rerankEnabledHint}>
+            <input
+              type="checkbox"
+              checked={server.rerank_enabled}
+              onChange={(e) => setServerBoolean("rerank_enabled", e.target.checked)}
+              className="h-4 w-4 accent-accent"
+            />
+          </Row>
+
+          <Row label={t.settings.rerankApiKey} hint={t.llm.keepKeyHint}>
+            <SecretInput
+              configured={server.rerank_api_key_set}
+              onCommit={(v) => setServerSecret("rerank_api_key", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.rerankBaseUrl}>
+            <TextInput
+              value={server.rerank_base_url}
+              className="w-72"
+              onCommit={(v) => setServerString("rerank_base_url", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.rerankModel}>
+            <TextInput
+              value={server.rerank_model}
+              className="w-48"
+              onCommit={(v) => setServerString("rerank_model", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.rerankTopN}>
+            <NumberInput
+              value={server.rerank_top_n}
+              min={1}
+              max={1000}
+              step={1}
+              className="w-20"
+              onCommit={(v) => setServerNumber("rerank_top_n", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.rerankMaxDocChars}>
+            <NumberInput
+              value={server.rerank_max_doc_chars}
+              min={1}
+              max={200000}
+              step={100}
+              className="w-24"
+              onCommit={(v) => setServerNumber("rerank_max_doc_chars", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.rerankConcurrency}>
+            <NumberInput
+              value={server.rerank_concurrency}
+              min={1}
+              max={64}
+              step={1}
+              className="w-16"
+              onCommit={(v) => setServerNumber("rerank_concurrency", v)}
+            />
+          </Row>
+
+          <Row label={t.settings.evidenceSelection} hint={t.settings.evidenceSelectionHint}>
+            <select
+              value={server.evidence_selection}
+              onChange={(e) => setServerString("evidence_selection", e.target.value)}
+              className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            >
+              <option value="quota">quota</option>
+              <option value="rerank">rerank</option>
+            </select>
+          </Row>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 // ---- Server status + LLM editor --------------------------------------------
 
 function ServerSection({ ctx }: { ctx: ServerCtx }) {
@@ -419,6 +675,23 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
             v={server.read_compression_enabled ? t.common.enabled : t.common.disabled}
           />
           <Kv k={t.settings.kv.ingestConcurrency} v={String(server.llm_ingest_concurrency)} />
+          <Kv
+            k={t.settings.kv.semanticRecall}
+            v={capabilityStatus(
+              server.semantic_recall_enabled,
+              server.embedding_api_key_set,
+              t,
+            )}
+          />
+          <Kv
+            k={t.settings.kv.embedding}
+            v={`${server.embedding_provider}/${server.embedding_model} (${server.embedding_dimensions}d)`}
+          />
+          <Kv
+            k={t.settings.kv.rerank}
+            v={capabilityStatus(server.rerank_enabled, server.rerank_api_key_set, t)}
+          />
+          <Kv k={t.settings.kv.evidenceSelection} v={server.evidence_selection} />
           <Kv
             k={t.settings.kv.vision}
             v={visionConfigured(llm) ? t.settings.visionConfigured : t.settings.visionMissing}
@@ -485,6 +758,15 @@ function Kv({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   );
 }
 
+function capabilityStatus(
+  enabled: boolean,
+  keySet: boolean,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  if (!enabled) return t.common.disabled;
+  return keySet ? t.common.enabled : t.settings.enabledMissingKey;
+}
+
 // Local-state number input that commits on blur / Enter, so the server
 // only sees the final value (PUT per keystroke would spam the overlay
 // with intermediate junk like 1, 12, 124, ...). Out-of-range values
@@ -538,6 +820,99 @@ function NumberInput({
         className,
       )}
     />
+  );
+}
+
+function TextInput({
+  value,
+  disabled,
+  className,
+  onCommit,
+}: {
+  value: string | undefined;
+  disabled?: boolean;
+  className?: string;
+  onCommit: (v: string) => void;
+}) {
+  const [draft, setDraft] = useState<string>(value ?? "");
+  useEffect(() => {
+    setDraft(value ?? "");
+  }, [value]);
+
+  const commit = () => {
+    const v = draft.trim();
+    if (!v || v === value) {
+      setDraft(value ?? "");
+      return;
+    }
+    onCommit(v);
+  };
+
+  return (
+    <input
+      value={draft}
+      disabled={disabled}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+      className={cn(
+        "rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs disabled:opacity-50",
+        className,
+      )}
+    />
+  );
+}
+
+function SecretInput({
+  configured,
+  disabled,
+  onCommit,
+}: {
+  configured: boolean;
+  disabled?: boolean;
+  onCommit: (v: string) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const commit = async () => {
+    const v = draft.trim();
+    if (!v || saving) return;
+    setSaving(true);
+    try {
+      await onCommit(v);
+      setDraft("");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="password"
+        value={draft}
+        disabled={disabled || saving}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void commit();
+        }}
+        placeholder={configured ? t.settings.secretConfigured : t.common.unset}
+        className="w-48 rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs disabled:opacity-50"
+      />
+      <button
+        type="button"
+        title={t.common.save}
+        onClick={() => void commit()}
+        disabled={disabled || saving || !draft.trim()}
+        className="inline-flex h-7 w-7 items-center justify-center rounded border border-border bg-bg-base text-fg-muted hover:text-fg-base disabled:opacity-40"
+      >
+        <Save size={13} />
+      </button>
+    </div>
   );
 }
 

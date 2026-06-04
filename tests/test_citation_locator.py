@@ -47,54 +47,53 @@ def _import_runtime():
 
 def _check_regex():
     rt = _import_runtime()
-    # Group layout: 1=marker, 2=eid, 3=quote, 4=page, 5=reason
     eid = "12345678-1234-1234-1234-123456789012"
     cases = [
         # quote, simple
         (
             f'[^a]: entry_id={eid}, quote="合同第4.6条规定" - 论证 Y',
-            ("a", eid, "合同第4.6条规定", None, "论证 Y"),
+            ("a", eid, "合同第4.6条规定", None, None, "论证 Y"),
         ),
         # quote with embedded escaped double-quote
         (
             f'[^b]: entry_id={eid}, quote="he said \\"yes\\"" - r',
-            ("b", eid, 'he said \\"yes\\"', None, "r"),
+            ("b", eid, 'he said \\"yes\\"', None, None, "r"),
         ),
         # page (PDF case)
         (
             f"[^c]: entry_id={eid}, page=3 - reason",
-            ("c", eid, None, "3", "reason"),
+            ("c", eid, None, "3", None, "reason"),
         ),
         # backticks around uuid + page
         (
             f"[^d]: entry_id=`{eid}`, page=`12` - r",
-            ("d", eid, None, "12", "r"),
+            ("d", eid, None, "12", None, "r"),
         ),
         # short hex prefix
         (
             '[^e]: entry_id=019e63b9, quote="第三条" - r',
-            ("e", "019e63b9", "第三条", None, "r"),
+            ("e", "019e63b9", "第三条", None, None, "r"),
         ),
         # bare entry_id, no locator, no reason
         (
             f"[^f]: entry_id={eid}",
-            ("f", eid, None, None, None),
+            ("f", eid, None, None, None, None),
         ),
-        # legacy lines= still parses (group 3/4 None) — tolerated for
+        # legacy lines= still parses — tolerated for
         # historical sessions, but no query string is emitted downstream
         (
             f"[^g]: entry_id={eid}, lines=10-40 - r",
-            ("g", eid, None, None, "r"),
+            ("g", eid, None, None, None, "r"),
         ),
         # legacy section_id= same: tolerated but no query string
         (
             f"[^h]: entry_id={eid}, section_id=s1 - r",
-            ("h", eid, None, None, "r"),
+            ("h", eid, None, None, "s1", "r"),
         ),
         # legacy descriptive lines=
         (
             f"[^i]: entry_id={eid}, lines=合同第4.6条 - r",
-            ("i", eid, None, None, "r"),
+            ("i", eid, None, None, None, "r"),
         ),
         # `+` cancatenated quotes: extra `+ "..."` segments tolerated
         # but ignored — only the first quote is captured. The agent is
@@ -103,36 +102,69 @@ def _check_regex():
         # the raw footnote definition to the user.
         (
             f'[^j]: entry_id={eid}, quote="第一段证据" + "第二段证据" - 拼接示例',
-            ("j", eid, "第一段证据", None, "拼接示例"),
+            ("j", eid, "第一段证据", None, None, "拼接示例"),
         ),
         # full-width parenthetical annotation after a page= value:
         # `page=54（第54页）`. Tolerated, the annotation is consumed,
-        # group 4 still captures the digits.
+        # page still captures the digits.
         (
             f"[^k]: entry_id={eid}, page=54（第54页） - 注释示例",
-            ("k", eid, None, "54", "注释示例"),
+            ("k", eid, None, "54", None, "注释示例"),
         ),
         # ASCII parenthetical after page=:
         (
             f"[^l]: entry_id={eid}, page=3 (table 2) - r",
-            ("l", eid, None, "3", "r"),
+            ("l", eid, None, "3", None, "r"),
         ),
         # page=N/A is tolerated and treated as no page. The prompt forbids
         # this, but older/live turns may contain it.
         (
             f'[^n]: entry_id={eid}, quote="abc", page=N/A - r',
-            ("n", eid, "abc", None, "r"),
+            ("n", eid, "abc", None, None, "r"),
+        ),
+        # LLM occasionally writes `reason=` as another field instead of the
+        # strict trailing `- reason`; tolerate it so raw entry_id metadata
+        # does not leak into rendered footnotes.
+        (
+            f'[^o]: entry_id={eid}, quote="boot guide", reason="summary reason"',
+            ("o", eid, "boot guide", None, None, "summary reason"),
+        ),
+        (
+            f"[^p]: entry_id={eid}, reason=bare summary",
+            ("p", eid, None, None, None, "bare summary"),
+        ),
+        # Extra fields are intentionally tolerated and ignored unless the
+        # renderer understands them.
+        (
+            (
+                f'[^q]: entry_id={eid}, source="tool", quote="abc", '
+                'confidence=0.93, reason="extra params"'
+            ),
+            ("q", eid, "abc", None, None, "extra params"),
+        ),
+        # Known fields can arrive in any order after entry_id.
+        (
+            f'[^r]: entry_id={eid}, reason="ordered", page=9, quote="abc"',
+            ("r", eid, "abc", "9", None, "ordered"),
         ),
         # full-width comma as field separator (LLM occasionally writes 中文 comma).
         (
             f"[^m]: entry_id={eid}，page=7 - r",
-            ("m", eid, None, "7", "r"),
+            ("m", eid, None, "7", None, "r"),
         ),
     ]
     for line, expected in cases:
         m = rt._LIVE_FOOTNOTE_RE.search(line)
         assert m, f"regex failed to match: {line!r}"
-        got = m.groups()
+        parsed = rt._parse_live_footnote(m)
+        got = (
+            parsed.marker,
+            parsed.entry_id,
+            parsed.quote,
+            parsed.page,
+            parsed.section_id,
+            parsed.reason,
+        )
         assert got == expected, f"\n line: {line!r}\n got:  {got}\n want: {expected}"
     print(f"[1] regex matched all {len(cases)} forms")
 
@@ -211,6 +243,28 @@ async def _check_rewrite():
         assert f"[my-doc.md](entry:{eid}?q=abc)" in out, out
         assert "entry_id=" not in out, out
         assert "page=N/A" not in out, out
+
+        # 4b. text + quote + reason= field variant: normalize to a real
+        # footnote link and hide raw entry_id/quote/reason metadata.
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc", reason="summary reason"',
+        )
+        assert f"[my-doc.md](entry:{eid}?q=abc)" in out, out
+        assert "summary reason" in out, out
+        assert "entry_id=" not in out and "reason=" not in out, out
+
+        # 4c. Unknown parameters are accepted and dropped; the fields that
+        # matter for navigation and display are still honored.
+        out = await rt._rewrite_footnotes_for_display(
+            (
+                f'body[^a]\n\n[^a]: entry_id={eid}, source="tool", '
+                'quote="abc", confidence=0.93, reason="extra params"'
+            ),
+        )
+        assert f"[my-doc.md](entry:{eid}?q=abc)" in out, out
+        assert "extra params" in out, out
+        for raw in ("entry_id=", "quote=", "reason=", "confidence=", "source="):
+            assert raw not in out, out
 
         # 4. legacy lines= → no query string (link opens file without jump)
         set_file(mime_type="text/markdown", original_ext="md", kind="text")

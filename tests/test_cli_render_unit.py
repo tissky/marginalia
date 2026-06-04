@@ -60,3 +60,21 @@ def test_render_markdown_shortens_raw_entry_id_footnotes() -> None:
     assert "Claim[1]." in out
     assert 'entry 019e5493; q="important clause"' in out
     assert "entry_id=" not in out
+
+
+def test_render_markdown_shortens_raw_entry_id_footnotes_with_extra_params() -> None:
+    md = (
+        "Claim[^a].\n\n"
+        "[^a]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1241, "
+        'source="tool", quote="important clause", confidence=0.93, '
+        'reason="evidence"\n'
+    )
+
+    out = render_markdown(md)
+
+    assert "Claim[1]." in out
+    assert 'entry 019e5493; q="important clause"' in out
+    assert "evidence" in out
+    assert "entry_id=" not in out
+    assert "reason=" not in out
+    assert "confidence=" not in out

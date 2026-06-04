@@ -77,6 +77,7 @@ Citations:
   `[^a]: entry_id=<id>, quote="<10-60 verbatim chars>", page=<n> - <reason>`
 - Required fields: `entry_id` and reason. Optional fields: `quote`, `page`.
   Field order is fixed: `entry_id`, `quote`, `page`, reason.
+- Put the reason after ` - `. Do not write `reason=` as a field.
 - Use `quote` whenever exact text is available. Escape `"` as `\\"` and `\\`
   as `\\\\`. Do not use multiple `quote=` fields or `+` concatenation.
 - Do not write `page=N/A`, `page=unknown`, or similar placeholders; omit

@@ -17,13 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 _TEST_ROOT = Path(__file__).resolve().parent / "_settings_routes_e2e_data"
-if _TEST_ROOT.exists():
-    shutil.rmtree(_TEST_ROOT)
-_TEST_ROOT.mkdir(parents=True)
+_TEST_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
@@ -52,6 +50,26 @@ _Settings.model_config["env_file"] = None
 for _opt in ("CHAT", "INGEST", "REFLECT", "VISION", "AUDIO"):
     for _field in ("PROVIDER", "API_KEY", "BASE_URL", "MODEL"):
         os.environ.pop(f"LLM_{_opt}_{_field}", None)
+for _var in (
+    "EMBEDDING_PROVIDER",
+    "EMBEDDING_API_KEY",
+    "EMBEDDING_BASE_URL",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_DIMENSIONS",
+    "EMBEDDING_BATCH_SIZE",
+    "SEMANTIC_INDEX_BACKEND",
+    "SEMANTIC_RECALL_ENABLED",
+    "SEMANTIC_RECALL_LIMIT",
+    "RERANK_ENABLED",
+    "RERANK_API_KEY",
+    "RERANK_BASE_URL",
+    "RERANK_MODEL",
+    "RERANK_TOP_N",
+    "RERANK_MAX_DOC_CHARS",
+    "RERANK_CONCURRENCY",
+    "EVIDENCE_SELECTION",
+):
+    os.environ.pop(_var, None)
 
 
 def _scrub_optional_profiles(s) -> None:
@@ -79,13 +97,31 @@ def _ensure_test_env() -> None:
     os.environ["LLM_DEFAULT_MODEL"] = "settings-default-model"
     os.environ["LLM_DEFAULT_PROVIDER"] = "openai"
     os.environ.pop("LLM_DEFAULT_BASE_URL", None)
+    for var in (
+        "EMBEDDING_PROVIDER",
+        "EMBEDDING_API_KEY",
+        "EMBEDDING_BASE_URL",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSIONS",
+        "EMBEDDING_BATCH_SIZE",
+        "SEMANTIC_INDEX_BACKEND",
+        "SEMANTIC_RECALL_ENABLED",
+        "SEMANTIC_RECALL_LIMIT",
+        "RERANK_ENABLED",
+        "RERANK_API_KEY",
+        "RERANK_BASE_URL",
+        "RERANK_MODEL",
+        "RERANK_TOP_N",
+        "RERANK_MAX_DOC_CHARS",
+        "RERANK_CONCURRENCY",
+        "EVIDENCE_SELECTION",
+    ):
+        os.environ.pop(var, None)
     get_settings.cache_clear()  # type: ignore[attr-defined]
     _scrub_optional_profiles(get_settings())
-    # Drop the GUI-write overlay too so prior tests in the same module
-    # don't leak overrides into "fresh" snapshot tests.
-    overlay = _TEST_ROOT / "config_overlay.json"
-    if overlay.exists():
-        overlay.unlink()
+    # Direct-write reset avoids unlink/rename, which restricted Windows
+    # sandboxes may deny. "{}" reads the same as a missing overlay.
+    (_TEST_ROOT / "config_overlay.json").write_text("{}", encoding="utf-8")
 
 import httpx
 from httpx import ASGITransport
@@ -93,15 +129,25 @@ from httpx import ASGITransport
 from marginalia.config import get_settings
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
-from marginalia.db.engine import get_engine
-from marginalia.db.models import Base
 from marginalia.main import app
 
 
+@asynccontextmanager
+async def _settings_routes_only_lifespan(_app):
+    """Settings endpoints do not touch the database.
+
+    The full app lifespan initializes sqlite with WAL, which is covered by
+    dedicated DB tests and can fail in restricted filesystems. Keep this
+    route test focused on settings payloads and overlay writes.
+    """
+    yield
+
+
+app.router.lifespan_context = _settings_routes_only_lifespan
+
+
 async def _create_schema() -> None:
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    return None
 
 
 async def test_server_snapshot_no_secrets() -> None:
@@ -118,6 +164,14 @@ async def test_server_snapshot_no_secrets() -> None:
             assert body["default_on_conflict"] in ("rename", "error", "skip")
             assert body["worker_batch_size"] >= 1
             assert body["llm_ingest_concurrency"] >= 1
+            assert body["embedding_api_key_set"] is False
+            assert body["embedding_provider"] in ("dashscope", "openai-compatible")
+            assert body["semantic_recall_enabled"] is False
+            assert body["semantic_recall_configured"] is False
+            assert body["rerank_enabled"] is False
+            assert body["rerank_api_key_set"] is False
+            assert body["rerank_configured"] is False
+            assert body["evidence_selection"] in ("quota", "rerank")
             # Sanity: no secret keys / DSN-shaped fields snuck in.
             for k, v in body.items():
                 if isinstance(v, str):
@@ -170,6 +224,23 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
                         "agent_final_answer_max_chars": 180000,
                         "worker_batch_size": 3,
                         "llm_ingest_concurrency": 6,
+                        "embedding_provider": "dashscope",
+                        "embedding_api_key": "emb-secret-XXXX",
+                        "embedding_base_url": "https://emb.example.test/v1",
+                        "embedding_model": "embed-model",
+                        "embedding_dimensions": 512,
+                        "embedding_batch_size": 8,
+                        "semantic_index_backend": "file",
+                        "semantic_recall_enabled": True,
+                        "semantic_recall_limit": 42,
+                        "rerank_enabled": True,
+                        "rerank_api_key": "rerank-secret-XXXX",
+                        "rerank_base_url": "https://rerank.example.test/v1",
+                        "rerank_model": "rerank-model",
+                        "rerank_top_n": 12,
+                        "rerank_max_doc_chars": 1600,
+                        "rerank_concurrency": 4,
+                        "evidence_selection": "rerank",
                     },
                 },
             )
@@ -181,8 +252,19 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             assert body["overlay"]["agent_final_answer_max_chars"] == 180000
             assert body["overlay"]["worker_batch_size"] == 3
             assert body["overlay"]["llm_ingest_concurrency"] == 6
-            # Other profiles still resolve from default.
-            assert body["profiles"]["ingest"]["model"] == "settings-default-model"
+            assert body["overlay"]["embedding_provider"] == "dashscope"
+            assert body["overlay"]["embedding_api_key"] != "emb-secret-XXXX"
+            assert "***" in body["overlay"]["embedding_api_key"]
+            assert body["overlay"]["embedding_model"] == "embed-model"
+            assert body["overlay"]["semantic_recall_enabled"] is True
+            assert body["overlay"]["semantic_recall_limit"] == 42
+            assert body["overlay"]["rerank_enabled"] is True
+            assert body["overlay"]["rerank_api_key"] != "rerank-secret-XXXX"
+            assert "***" in body["overlay"]["rerank_api_key"]
+            assert body["overlay"]["rerank_model"] == "rerank-model"
+            assert body["overlay"]["evidence_selection"] == "rerank"
+            # Other profiles are not overwritten by the chat override.
+            assert body["profiles"]["ingest"]["model"] != "gpt-4o-2026"
 
             overlay_file = _TEST_ROOT / "config_overlay.json"
             assert overlay_file.exists(), "overlay file not created"
@@ -192,6 +274,8 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
 
             # PUT response must not echo the raw key either.
             assert "sk-default-key-XXXX" not in r.text
+            assert "emb-secret-XXXX" not in r.text
+            assert "rerank-secret-XXXX" not in r.text
 
             # And get_settings() now sees the new model.
             s = get_settings()
@@ -200,6 +284,33 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             assert s.agent_final_answer_max_chars == 180000
             assert s.worker_batch_size == 3
             assert s.llm_ingest_concurrency == 6
+            assert s.embedding_provider == "dashscope"
+            assert s.embedding_api_key == "emb-secret-XXXX"
+            assert s.embedding_base_url == "https://emb.example.test/v1"
+            assert s.embedding_model == "embed-model"
+            assert s.embedding_dimensions == 512
+            assert s.embedding_batch_size == 8
+            assert s.semantic_index_backend == "file"
+            assert s.semantic_recall_enabled is True
+            assert s.semantic_recall_limit == 42
+            assert s.rerank_enabled is True
+            assert s.rerank_api_key == "rerank-secret-XXXX"
+            assert s.rerank_base_url == "https://rerank.example.test/v1"
+            assert s.rerank_model == "rerank-model"
+            assert s.rerank_top_n == 12
+            assert s.rerank_max_doc_chars == 1600
+            assert s.rerank_concurrency == 4
+            assert s.evidence_selection == "rerank"
+
+            r = await c.get("/v1/settings/server")
+            assert r.status_code == 200, r.text
+            server = r.json()
+            assert server["embedding_api_key_set"] is True
+            assert server["semantic_recall_configured"] is True
+            assert server["rerank_api_key_set"] is True
+            assert server["rerank_configured"] is True
+            assert "emb-secret-XXXX" not in r.text
+            assert "rerank-secret-XXXX" not in r.text
             print("[3] PUT /v1/settings/llm: overlay written, cache invalidated")
 
 

@@ -20,6 +20,12 @@ from contextlib import contextmanager
 
 from glowpy import ColorDepth, Theme, get_theme, render as _glow_render
 
+from marginalia.citations import (
+    CITATION_FOOTNOTE_RE,
+    parse_citation_footnote_match,
+    unescape_citation_quote,
+)
+
 # ---- ANSI codes (kept for spinner + commands.py imports) ------------------
 
 RESET = "\x1b[0m"
@@ -108,13 +114,7 @@ _THEME_ACCENT = _theme_accent()
 
 _TABLE_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
 _ENTRY_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(entry:([^)]+)\)")
-_RAW_ENTRY_FOOTNOTE_RE = re.compile(
-    r"(^\[\^[^\]]+\]:\s*)entry_id\s*=\s*`?"
-    r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
-    r"((?:\s*[,，]\s*[^-—–\n]+)*)"
-    r"(?:\s*[-—–]\s*(.*))?$",
-    re.MULTILINE,
-)
+_RAW_ENTRY_FOOTNOTE_RE = CITATION_FOOTNOTE_RE
 
 
 def _split_table_cells(line: str) -> list[str]:
@@ -318,26 +318,20 @@ def _replace_entry_link(match: re.Match[str]) -> str:
 
 
 def _replace_raw_entry_footnote(match: re.Match[str]) -> str:
-    prefix = match.group(1)
-    entry_id = match.group(2)
-    fields = match.group(3) or ""
-    reason = (match.group(4) or "").strip()
+    footnote = parse_citation_footnote_match(match)
+    entry_id = footnote.entry_id
     parts = [f"entry {entry_id[:8]}"]
-    page_match = re.search(
-        r"page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?", fields, re.IGNORECASE
-    )
-    quote_match = re.search(r'quote\s*=\s*"((?:[^"\\]|\\.)*)"', fields)
-    if page_match:
-        parts.append(f"page {page_match.group(1)}")
-    elif quote_match:
-        quote = quote_match.group(1).replace(r"\"", '"').replace(r"\\", "\\")
+    if footnote.page:
+        parts.append(f"page {footnote.page}")
+    elif footnote.quote:
+        quote = unescape_citation_quote(footnote.quote)
         quote = " ".join(quote.split())
         if len(quote) > 48:
             quote = quote[:45].rstrip() + "..."
         parts.append(f'q="{quote}"')
-    text = prefix + "; ".join(parts)
-    if reason:
-        text += f" — {reason}"
+    text = f"[^{footnote.marker}]: " + "; ".join(parts)
+    if footnote.reason:
+        text += f" — {footnote.reason}"
     return text
 
 

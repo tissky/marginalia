@@ -74,6 +74,27 @@ def server_settings() -> dict[str, Any]:
         "read_compression_target_chars": s.read_compression_target_chars,
         "read_compression_context_chars": s.read_compression_context_chars,
         "llm_ingest_concurrency": s.llm_ingest_concurrency,
+        "embedding_provider": s.embedding_provider,
+        "embedding_api_key_set": bool(s.embedding_api_key),
+        "embedding_base_url": s.embedding_base_url,
+        "embedding_model": s.embedding_model,
+        "embedding_dimensions": s.embedding_dimensions,
+        "embedding_batch_size": s.embedding_batch_size,
+        "semantic_index_backend": s.semantic_index_backend,
+        "semantic_recall_enabled": s.semantic_recall_enabled,
+        "semantic_recall_limit": s.semantic_recall_limit,
+        "semantic_recall_configured": bool(
+            s.semantic_recall_enabled and s.embedding_api_key
+        ),
+        "rerank_enabled": s.rerank_enabled,
+        "rerank_api_key_set": bool(s.rerank_api_key),
+        "rerank_base_url": s.rerank_base_url,
+        "rerank_model": s.rerank_model,
+        "rerank_top_n": s.rerank_top_n,
+        "rerank_max_doc_chars": s.rerank_max_doc_chars,
+        "rerank_concurrency": s.rerank_concurrency,
+        "rerank_configured": bool(s.rerank_enabled and s.rerank_api_key),
+        "evidence_selection": s.evidence_selection,
         "vision_profile_configured": has_vision_profile(s),
     }
 

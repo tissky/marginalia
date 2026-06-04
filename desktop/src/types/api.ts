@@ -325,6 +325,25 @@ export interface ServerSettings {
   read_compression_target_chars: number;
   read_compression_context_chars: number;
   llm_ingest_concurrency: number;
+  embedding_provider: "dashscope" | "openai-compatible";
+  embedding_api_key_set: boolean;
+  embedding_base_url: string;
+  embedding_model: string;
+  embedding_dimensions: number;
+  embedding_batch_size: number;
+  semantic_index_backend: "auto" | "file" | "sqlite-vec";
+  semantic_recall_enabled: boolean;
+  semantic_recall_limit: number;
+  semantic_recall_configured: boolean;
+  rerank_enabled: boolean;
+  rerank_api_key_set: boolean;
+  rerank_base_url: string;
+  rerank_model: string;
+  rerank_top_n: number;
+  rerank_max_doc_chars: number;
+  rerank_concurrency: number;
+  rerank_configured: boolean;
+  evidence_selection: "quota" | "rerank";
   vision_profile_configured: boolean;
 }
 

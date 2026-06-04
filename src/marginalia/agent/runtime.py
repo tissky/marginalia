@@ -62,6 +62,12 @@ from marginalia.agent.stable_context import (
 )
 from marginalia.agent.tools import ToolContext, all_tool_defs, get_tool
 from marginalia.agent.types import AgentEvent, AgentTurnError, RunOptions, TurnUsage
+from marginalia.citations import (
+    CITATION_FOOTNOTE_RE,
+    CitationFootnote,
+    parse_citation_footnote_match,
+    unescape_citation_quote,
+)
 from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import session_scope
 from marginalia.llm import (
@@ -640,36 +646,20 @@ async def _run_plan_phase(
 # Backticks around the id / page / quote are tolerated. Quote bodies use
 # `\"` and `\\` for embedded `"` and `\`.
 #
-# Defence in depth against LLM-emitted variants the prompt forbids but
-# can still slip through: the field separator accepts `，` (中文逗号) as
-# well as `,`; a quote may be followed by extra `+ "..."` segments
-# (consumed but ignored — the URL can only carry one quote, so the GUI
-# jumps to the first); and a value may be trailed by a parenthetical
-# annotation in either ASCII or full-width brackets, e.g.
-# `page=54（第54页）` (also consumed and ignored). We could not parse
-# these in `runtime.py` and the entire footnote definition would leak
-# unrendered to the user.
-_LIVE_FOOTNOTE_RE = re.compile(
-    r"^\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
-    r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
-    r"(?:\s*[,，]\s*(?:"
-    r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
-    r'(?:\s*\+\s*"(?:[^"\\]|\\.)*")*'                   # extra `+ "..."` segments: tolerated, ignored
-    r"|page\s*=\s*`?(?:([0-9]+(?:-[0-9]+)?)|(?:N/?A|n/?a|NA|na|none|null|unknown))`?"
-    r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated
-    r"|section_id\s*=\s*`?[^\s,`]+`?"                   # legacy section_id: tolerated
-    r")"
-    r"(?:\s*[(（][^)）]*[)）])?"             # optional trailing (...) / （...） annotation
-    r")*"
-    r"(?:\s+[(（][^)）]*[)）])?"
-    r"(?:\s*[-—–]\s*(.+?))?"
-    r"\s*$",
-    re.MULTILINE,
-)
+# Defence in depth against LLM-emitted variants the prompt forbids but can
+# still slip through: after `entry_id=<id>`, all extra key/value parameters
+# are parsed leniently. Known fields (`quote`, `page`, `section_id`,
+# `reason`) are extracted; unknown fields are ignored so they cannot leak as
+# raw footnote definitions in the UI.
+_LIVE_FOOTNOTE_RE = CITATION_FOOTNOTE_RE
+
+
+def _parse_live_footnote(match: re.Match[str]) -> CitationFootnote:
+    return parse_citation_footnote_match(match)
 
 
 def _unescape_quote(s: str) -> str:
-    return s.replace(r"\"", '"').replace(r"\\", "\\")
+    return unescape_citation_quote(s)
 
 
 # Kinds whose FileViewer body is DOM-rendered text — the in-page text
@@ -783,11 +773,14 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
     """
     if not answer or "entry_id" not in answer:
         return answer
-    matches = list(_LIVE_FOOTNOTE_RE.finditer(answer))
-    if not matches:
+    footnotes = [
+        _parse_live_footnote(match)
+        for match in _LIVE_FOOTNOTE_RE.finditer(answer)
+    ]
+    if not footnotes:
         return answer
 
-    raw_ids = list({m.group(2).strip() for m in matches})
+    raw_ids = list({footnote.entry_id for footnote in footnotes})
     name_by_id: dict[str, str] = {}
     file_by_id: dict[str, Any] = {}
     resolved: dict[str, str] = {}
@@ -809,12 +802,12 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
 
     located_pdf_pages: dict[int, int] = {}
     pdf_pages_cache: dict[str, PdfTextRange] = {}
-    for m in matches:
-        raw_eid = m.group(2).strip()
+    for footnote in footnotes:
+        raw_eid = footnote.entry_id
         full_eid = resolved.get(raw_eid, raw_eid)
         file = file_by_id.get(full_eid)
-        quote = m.group(3)
-        page = (m.group(4) or "").strip() or None
+        quote = footnote.quote
+        page = footnote.page
         if not _is_pdf_file(file):
             continue
         located = None
@@ -825,14 +818,17 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
         if located is None and page:
             located = await _resolve_pdf_page_locator(file, page)
         if located:
-            located_pdf_pages[m.start()] = located
+            located_pdf_pages[footnote.start] = located
+
+    footnote_by_start = {footnote.start: footnote for footnote in footnotes}
 
     def _replace(m: re.Match[str]) -> str:
-        marker = m.group(1)
-        raw_eid = m.group(2).strip()
-        quote = m.group(3)
-        page = (m.group(4) or "").strip() or None
-        reason = m.group(5).strip() if m.group(5) else None
+        footnote = footnote_by_start.get(m.start()) or _parse_live_footnote(m)
+        marker = footnote.marker
+        raw_eid = footnote.entry_id
+        quote = footnote.quote
+        page = footnote.page
+        reason = footnote.reason
 
         full_eid = resolved.get(raw_eid, raw_eid)
         short = full_eid[:8]
