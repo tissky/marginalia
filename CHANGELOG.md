@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.2.3 - 2026-06-05
+
+### Added
+
+- CLI chat mode control: `/mode [quick|deep]` now shows or switches the
+  investigation mode, and CLI chat requests send the selected mode to
+  `/v1/chat`.
+- `marginalia init` now includes optional embedding, semantic recall, rerank,
+  and evidence-selection settings in the generated starter `.env`.
+
+### Fixed
+
+- Desktop chat restores the latest quick/deep mode when returning to an active
+  stream or reopening a historical session.
+- Session list and transcript APIs now expose the latest recorded chat mode so
+  the UI can replay sessions without silently falling back to deep mode.
+- Final-answer continuation and Quick-mode forced-answer guardrails now ask
+  the model to keep the same language as the user's latest message.
+- `recall_knowledge` now prioritizes selected evidence entries before journal
+  note-linked entries when building `candidate_entry_ids`, so rerank/quota
+  evidence selection is preserved for follow-up verification and reads.
+
+### Changed
+
+- Clarified internal `search_metadata` naming so local metadata signal ranking
+  is not confused with the optional external reranker.
+- GitHub release notes now pull the matching version section from
+  `CHANGELOG.md`, keeping generated release notes aligned with prior releases.
+
+### Validation
+
+- Added coverage for CLI quick/deep mode requests, starter `.env` retrieval
+  settings, session mode restore, and selected-evidence candidate ordering.
+- Main CI passed for the post-0.2.2 fixes before preparing this release.
+
 ## 0.2.2 - 2026-06-04
 
 ### Added
