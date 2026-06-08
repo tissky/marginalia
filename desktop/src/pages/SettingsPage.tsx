@@ -12,7 +12,7 @@
  *  Sections 1-2 work without a backend. Section 3 calls /v1/settings/*
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
-import { Save, Sun, Moon, Monitor } from "lucide-react";
+import { Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
 
 import { setBaseUrl, getBaseUrl, settings as settingsApi } from "@/api/client";
 import { LlmProfileEditor } from "@/components/LlmProfileEditor";
@@ -437,6 +437,9 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
     setServerSecret,
   } = ctx;
   const { t } = useI18n();
+  const [rebuildBusy, setRebuildBusy] = useState(false);
+  const [rebuildMessage, setRebuildMessage] = useState<string | null>(null);
+  const [rebuildError, setRebuildError] = useState<string | null>(null);
 
   if (!server) {
     return (
@@ -445,6 +448,20 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
       </Section>
     );
   }
+
+  const rebuildSemanticIndex = async () => {
+    setRebuildBusy(true);
+    setRebuildMessage(null);
+    setRebuildError(null);
+    try {
+      const result = await settingsApi.rebuildSemanticIndex();
+      setRebuildMessage(t.settings.semanticRebuildQueued(result.task_id?.slice(0, 8) ?? ""));
+    } catch (e: unknown) {
+      setRebuildError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRebuildBusy(false);
+    }
+  };
 
   return (
     <Section title={t.settings.retrievalTitle} subtitle={t.settings.retrievalSubtitle}>
@@ -540,6 +557,28 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               <option value="file">file</option>
               <option value="sqlite-vec">sqlite-vec</option>
             </select>
+          </Row>
+
+          <Row label={t.settings.semanticIndex} hint={t.settings.semanticIndexHint}>
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm text-fg-muted">
+                  {semanticIndexStatusLabel(server, t)}
+                </span>
+                <button
+                  type="button"
+                  disabled={!server.embedding_api_key_set || rebuildBusy}
+                  onClick={rebuildSemanticIndex}
+                  className="inline-flex items-center gap-2 rounded border border-border bg-bg-base px-2 py-1 text-sm hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                  title={server.embedding_api_key_set ? t.settings.rebuildSemanticIndex : t.settings.semanticRebuildNoKey}
+                >
+                  <RefreshCw className={cn("h-4 w-4", rebuildBusy && "animate-spin")} />
+                  {t.settings.rebuildSemanticIndex}
+                </button>
+              </div>
+              {rebuildMessage && <p className="text-xs text-fg-muted">{rebuildMessage}</p>}
+              {rebuildError && <p className="text-xs text-danger">{rebuildError}</p>}
+            </div>
           </Row>
         </div>
 
@@ -765,6 +804,16 @@ function capabilityStatus(
 ): string {
   if (!enabled) return t.common.disabled;
   return keySet ? t.common.enabled : t.settings.enabledMissingKey;
+}
+
+function semanticIndexStatusLabel(
+  server: ServerSettings,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const index = server.semantic_index;
+  if (!index?.exists) return t.settings.semanticIndexMissing;
+  if (index.needs_rebuild || !index.compatible) return t.settings.semanticIndexNeedsRebuild;
+  return t.settings.semanticIndexReady(index.entries);
 }
 
 // Local-state number input that commits on blur / Enter, so the server

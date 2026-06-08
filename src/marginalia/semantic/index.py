@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from marginalia.config import get_settings
 from marginalia.db.models import File, FileEntry
 from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import files as files_repo
 from marginalia.semantic.embeddings import EmbeddingResult, get_embedding_client
 
 
@@ -51,6 +52,17 @@ class SemanticIndexBuildResult:
 
 
 @dataclass(slots=True)
+class SemanticIndexRefreshResult:
+    index_name: str
+    index_dir: Path
+    entries_removed: int
+    entries_refreshed: int
+    entries_total: int
+    total_tokens: int
+    skipped_reason: str | None = None
+
+
+@dataclass(slots=True)
 class SemanticHit:
     entry_id: str
     score: float
@@ -77,6 +89,29 @@ def semantic_index_dir(index_name: str = DEFAULT_INDEX_NAME) -> Path:
 def semantic_recall_configured() -> bool:
     settings = get_settings()
     return bool(settings.semantic_recall_enabled and settings.embedding_api_key)
+
+
+def semantic_index_status(index_name: str = DEFAULT_INDEX_NAME) -> dict[str, Any]:
+    settings = get_settings()
+    idx_dir = semantic_index_dir(index_name)
+    manifest_path = idx_dir / "manifest.json"
+    manifest = _read_manifest(manifest_path)
+    exists = _semantic_index_exists(index_name)
+    compatible = bool(manifest and _manifest_matches_settings(manifest, settings))
+    return {
+        "index_name": index_name,
+        "index_dir": str(idx_dir),
+        "exists": exists,
+        "provider": manifest.get("provider") if manifest else None,
+        "model": manifest.get("model") if manifest else None,
+        "dimensions": manifest.get("dimensions") if manifest else None,
+        "entries": manifest.get("entries") if manifest else 0,
+        "configured_provider": settings.embedding_provider,
+        "configured_model": settings.embedding_model,
+        "configured_dimensions": settings.embedding_dimensions,
+        "compatible": compatible,
+        "needs_rebuild": exists and not compatible,
+    }
 
 
 def sqlite_vec_available() -> bool:
@@ -170,6 +205,7 @@ async def build_semantic_index(
     manifest = {
         "version": INDEX_VERSION,
         "index_name": index_name,
+        "provider": settings.embedding_provider,
         "model": model,
         "dimensions": dimensions,
         "entries": count,
@@ -184,7 +220,9 @@ async def build_semantic_index(
     (out_dir / "manifest.json.tmp").replace(out_dir / "manifest.json")
     _load_semantic_index_cached.cache_clear()
 
-    if _should_build_sqlite_vec_index(settings):
+    if count <= 0:
+        _remove_sqlite_vec_index(index_name)
+    elif _should_build_sqlite_vec_index(settings):
         try:
             _write_sqlite_vec_index(out_dir, dimensions=dimensions, entries_count=count)
         except Exception:
@@ -202,6 +240,186 @@ async def build_semantic_index(
         dimensions=dimensions,
         model=model,
         elapsed_ms=int((time.monotonic() - started) * 1000),
+        total_tokens=total_tokens,
+    )
+
+
+async def refresh_semantic_index_for_file(
+    session: AsyncSession,
+    file_id: str,
+    *,
+    index_name: str = DEFAULT_INDEX_NAME,
+    client: EmbeddingClient | None = None,
+) -> SemanticIndexRefreshResult:
+    settings = get_settings()
+    out_dir = semantic_index_dir(index_name)
+    if not semantic_recall_configured():
+        return SemanticIndexRefreshResult(
+            index_name=index_name,
+            index_dir=out_dir,
+            entries_removed=0,
+            entries_refreshed=0,
+            entries_total=0,
+            total_tokens=0,
+            skipped_reason="semantic_recall_not_configured",
+        )
+
+    entry_ids = await files_repo.list_live_entry_ids_for_file(session, file_id)
+    pairs = await _load_indexable_entries(session, entry_ids)
+
+    if not _semantic_index_exists(index_name):
+        if not pairs:
+            return SemanticIndexRefreshResult(
+                index_name=index_name,
+                index_dir=out_dir,
+                entries_removed=0,
+                entries_refreshed=0,
+                entries_total=0,
+                total_tokens=0,
+                skipped_reason="no_indexable_entries",
+            )
+        built = await build_semantic_index(
+            session,
+            index_name=index_name,
+            entry_ids=[entry.id for entry, _file in pairs],
+            client=client,
+            progress_every=0,
+        )
+        return SemanticIndexRefreshResult(
+            index_name=index_name,
+            index_dir=built.index_dir,
+            entries_removed=0,
+            entries_refreshed=built.entries_indexed,
+            entries_total=built.entries_indexed,
+            total_tokens=built.total_tokens,
+        )
+
+    manifest_path = out_dir / "manifest.json"
+    entries_path = out_dir / "entries.jsonl"
+    vectors_path = out_dir / "vectors.f32"
+    manifest = _read_manifest(manifest_path)
+    if not manifest or not _manifest_matches_settings(manifest, settings):
+        return SemanticIndexRefreshResult(
+            index_name=index_name,
+            index_dir=out_dir,
+            entries_removed=0,
+            entries_refreshed=0,
+            entries_total=int((manifest or {}).get("entries") or 0),
+            total_tokens=0,
+            skipped_reason="index_config_mismatch",
+        )
+
+    dimensions = int(manifest.get("dimensions") or 0)
+    entries_count = int(manifest.get("entries") or 0)
+    if dimensions <= 0 or not (entries_path.exists() and vectors_path.exists()):
+        built = await build_semantic_index(
+            session,
+            index_name=index_name,
+            client=client,
+            progress_every=0,
+        )
+        return SemanticIndexRefreshResult(
+            index_name=index_name,
+            index_dir=built.index_dir,
+            entries_removed=0,
+            entries_refreshed=len(pairs),
+            entries_total=built.entries_indexed,
+            total_tokens=built.total_tokens,
+        )
+
+    metadata = _read_metadata(entries_path)
+    raw_vectors = vectors_path.read_bytes()
+    vector_bytes = dimensions * 4
+    available = min(entries_count, len(metadata), len(raw_vectors) // vector_bytes)
+    target_entry_ids = {entry.id for entry, _file in pairs} | set(entry_ids)
+
+    kept_metadata: list[dict[str, Any]] = []
+    kept_vectors = bytearray()
+    removed = 0
+    for idx, row in enumerate(metadata[:available]):
+        row_file_id = str(row.get("file_id") or "")
+        row_entry_id = str(row.get("entry_id") or "")
+        if row_file_id == file_id or row_entry_id in target_entry_ids:
+            removed += 1
+            continue
+        kept_metadata.append(row)
+        start = idx * vector_bytes
+        kept_vectors.extend(raw_vectors[start:start + vector_bytes])
+
+    refreshed_metadata: list[dict[str, Any]] = []
+    refreshed_vectors = bytearray()
+    total_tokens = 0
+    client = client or get_embedding_client(settings)
+    batch_size = max(1, min(10, int(settings.embedding_batch_size or 10)))
+    for start in range(0, len(pairs), batch_size):
+        batch = pairs[start:start + batch_size]
+        embedded_batch, texts, result = await _embed_batch(client, batch)
+        total_tokens += result.total_tokens
+        if len(result.vectors) != len(embedded_batch):
+            raise RuntimeError(
+                "embedding response count mismatch: "
+                f"expected {len(embedded_batch)}, got {len(result.vectors)}"
+            )
+        for (entry, file_row), text, vector in zip(embedded_batch, texts, result.vectors):
+            if not vector:
+                continue
+            if len(vector) != dimensions:
+                raise RuntimeError(
+                    f"embedding dimension changed from {dimensions} to {len(vector)}"
+                )
+            vector = _normalize(vector)
+            refreshed_vectors.extend(struct.pack(f"<{dimensions}f", *vector))
+            refreshed_metadata.append({
+                "entry_id": entry.id,
+                "file_id": file_row.id,
+                "display_name": entry.display_name,
+                "text_hash": sha256(text.encode("utf-8")).hexdigest(),
+                "updated_at": str(max(entry.updated_at, file_row.updated_at)),
+            })
+
+    next_metadata = kept_metadata + refreshed_metadata
+    next_vectors = kept_vectors + refreshed_vectors
+    next_manifest = {
+        **manifest,
+        "version": INDEX_VERSION,
+        "index_name": index_name,
+        "provider": settings.embedding_provider,
+        "model": settings.embedding_model,
+        "dimensions": dimensions,
+        "entries": len(next_metadata),
+        "created_at_ms": int(time.time() * 1000),
+    }
+    _replace_file_index(
+        out_dir,
+        manifest=next_manifest,
+        metadata=next_metadata,
+        vectors=bytes(next_vectors),
+    )
+    _load_semantic_index_cached.cache_clear()
+
+    if len(next_metadata) <= 0:
+        _remove_sqlite_vec_index(index_name)
+    elif _should_build_sqlite_vec_index(settings):
+        try:
+            _write_sqlite_vec_index(
+                out_dir,
+                dimensions=dimensions,
+                entries_count=len(next_metadata),
+            )
+        except Exception:
+            if settings.semantic_index_backend == "sqlite-vec":
+                raise
+            print(
+                "  sqlite-vec index refresh skipped; falling back to file index",
+                file=sys.stderr,
+            )
+
+    return SemanticIndexRefreshResult(
+        index_name=index_name,
+        index_dir=out_dir,
+        entries_removed=removed,
+        entries_refreshed=len(refreshed_metadata),
+        entries_total=len(next_metadata),
         total_tokens=total_tokens,
     )
 
@@ -271,6 +489,9 @@ async def search_semantic_index_many(
     if not _semantic_index_exists(index_name):
         return [[] for _query in clean]
     settings = get_settings()
+    manifest = _read_manifest(semantic_index_dir(index_name) / "manifest.json")
+    if not manifest or not _manifest_matches_settings(manifest, settings):
+        return [[] for _query in clean]
     if client is None and not settings.embedding_api_key:
         return [[] for _query in clean]
     batch_size = max(1, min(10, int(batch_size or settings.embedding_batch_size or 10)))
@@ -444,8 +665,63 @@ def _semantic_index_exists(index_name: str) -> bool:
     )
 
 
+def _read_manifest(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _manifest_matches_settings(manifest: dict[str, Any], settings: Any) -> bool:
+    if int(manifest.get("version") or 0) != INDEX_VERSION:
+        return False
+    provider = manifest.get("provider")
+    if provider is not None and str(provider) != settings.embedding_provider:
+        return False
+    if str(manifest.get("model") or "") != settings.embedding_model:
+        return False
+    try:
+        dimensions = int(manifest.get("dimensions") or 0)
+    except (TypeError, ValueError):
+        return False
+    return dimensions == int(settings.embedding_dimensions or 0)
+
+
+def _replace_file_index(
+    index_dir: Path,
+    *,
+    manifest: dict[str, Any],
+    metadata: list[dict[str, Any]],
+    vectors: bytes,
+) -> None:
+    index_dir.mkdir(parents=True, exist_ok=True)
+    meta_tmp = index_dir / "entries.jsonl.tmp"
+    vec_tmp = index_dir / "vectors.f32.tmp"
+    manifest_tmp = index_dir / "manifest.json.tmp"
+    with meta_tmp.open("w", encoding="utf-8") as f:
+        for row in metadata:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    vec_tmp.write_bytes(vectors)
+    manifest_tmp.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    meta_tmp.replace(index_dir / "entries.jsonl")
+    vec_tmp.replace(index_dir / "vectors.f32")
+    manifest_tmp.replace(index_dir / "manifest.json")
+
+
 def _sqlite_vec_index_path(index_name: str = DEFAULT_INDEX_NAME) -> Path:
     return semantic_index_dir(index_name) / SQLITE_VEC_INDEX_FILENAME
+
+
+def _remove_sqlite_vec_index(index_name: str = DEFAULT_INDEX_NAME) -> None:
+    path = _sqlite_vec_index_path(index_name)
+    if path.exists():
+        path.unlink()
 
 
 def _should_build_sqlite_vec_index(settings: Any) -> bool:
@@ -699,7 +975,13 @@ async def _load_indexable_entries(
     if entry_ids:
         rows = await entries_repo.list_live_with_file_by_ids(session, entry_ids)
         by_id = {entry.id: (entry, file_row) for entry, file_row in rows}
-        return [by_id[eid] for eid in entry_ids if eid in by_id]
+        return [
+            pair
+            for eid in entry_ids
+            if (pair := by_id.get(eid)) is not None
+            and pair[0].lifecycle in entries_repo.ACTIVE_LIFECYCLES
+            and pair[1].ingest_status == "done"
+        ]
     stmt = (
         select(FileEntry, File)
         .join(File, File.id == FileEntry.file_id)

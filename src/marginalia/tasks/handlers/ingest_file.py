@@ -41,6 +41,7 @@ from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import tags as tags_repo
+from marginalia.semantic.index import refresh_semantic_index_for_file
 from marginalia.storage import get_storage
 from marginalia.tasks.kinds import KIND_INGEST_FILE, task_handler
 from marginalia.utils.ids import new_id
@@ -138,6 +139,7 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
     async with session_scope() as session:
         await _persist(session, file_id=file_id, entry_id=entry_id, result=result)
         await session.commit()
+    await _refresh_semantic_index(file_id)
 
 
 def _utcnow() -> datetime:
@@ -156,6 +158,38 @@ async def _mark_failed(file_id: str, *, reason: str) -> None:
             payload={"file_id": file_id, "status": "failed", "reason": reason},
         )
         await session.commit()
+
+
+async def _refresh_semantic_index(file_id: str) -> None:
+    try:
+        async with session_scope() as session:
+            result = await refresh_semantic_index_for_file(session, file_id)
+            if result.skipped_reason is None:
+                await audit_events_repo.append(
+                    session,
+                    kind="semantic_index_refreshed",
+                    payload={
+                        "file_id": file_id,
+                        "index_name": result.index_name,
+                        "entries_removed": result.entries_removed,
+                        "entries_refreshed": result.entries_refreshed,
+                        "entries_total": result.entries_total,
+                        "total_tokens": result.total_tokens,
+                    },
+                )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("semantic index refresh failed for file %s", file_id)
+        async with session_scope() as session:
+            await audit_events_repo.append(
+                session,
+                kind="semantic_index_refresh_failed",
+                payload={
+                    "file_id": file_id,
+                    "error": str(exc)[:500],
+                },
+            )
+            await session.commit()
 
 
 async def _build_context(

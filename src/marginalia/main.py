@@ -14,6 +14,7 @@ from marginalia.api.routes_exports import router as exports_router
 from marginalia.api.routes_file_entries import router as file_entries_router
 from marginalia.api.routes_files import router as files_router
 from marginalia.api.routes_folders import router as folders_router
+from marginalia.api.routes_semantic_index import router as semantic_index_router
 from marginalia.api.routes_settings import router as settings_router
 from marginalia.api.routes_tasks import router as tasks_router
 from marginalia.api.routes_tend import router as tend_router
@@ -157,6 +158,7 @@ app.include_router(chat_router, prefix=V1_PREFIX)
 app.include_router(exports_router, prefix=V1_PREFIX)
 app.include_router(tasks_router, prefix=V1_PREFIX)
 app.include_router(tend_router, prefix=V1_PREFIX)
+app.include_router(semantic_index_router, prefix=V1_PREFIX)
 app.include_router(settings_router, prefix=V1_PREFIX)
 
 

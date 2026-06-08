@@ -30,6 +30,7 @@ import type {
   RecentTasks,
   RunningCount,
   SearchResult,
+  SemanticIndexRebuildResult,
   ServerSettings,
   SessionInfo,
   SessionList,
@@ -390,5 +391,10 @@ export const settings = {
     _request<LlmSettings>(`/v1/settings/llm`, {
       method: "PUT",
       body: JSON.stringify({ patch, replace: false }),
+    }),
+  rebuildSemanticIndex: (concurrency = 1) =>
+    _request<SemanticIndexRebuildResult>(`/v1/semantic-index/rebuild`, {
+      method: "POST",
+      body: JSON.stringify({ concurrency }),
     }),
 };

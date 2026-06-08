@@ -15,6 +15,7 @@ from marginalia.semantic.embeddings import EmbeddingResult
 from marginalia.semantic.index import (
     SQLITE_VEC_INDEX_FILENAME,
     build_semantic_index,
+    refresh_semantic_index_for_file,
     search_semantic_index,
     search_semantic_index_many,
     semantic_index_dir,
@@ -49,6 +50,7 @@ async def test_semantic_index_builds_and_searches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MARGINALIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "3")
     if sqlite_vec_available():
         monkeypatch.setenv("SEMANTIC_INDEX_BACKEND", "sqlite-vec")
     from marginalia.config import get_settings
@@ -89,7 +91,7 @@ async def test_semantic_index_builds_and_searches(
                 id=raft_entry_id,
                 folder_id=None,
                 file_id=raft_file_id,
-                display_name="raft.txt",
+                display_name="doc-a.txt",
                 lifecycle="active",
                 catalog_id=None,
                 extra="",
@@ -119,7 +121,7 @@ async def test_semantic_index_builds_and_searches(
                 id=cooking_entry_id,
                 folder_id=None,
                 file_id=cooking_file_id,
-                display_name="cooking.txt",
+                display_name="doc-b.txt",
                 lifecycle="active",
                 catalog_id=None,
                 extra="",
@@ -160,6 +162,138 @@ async def test_semantic_index_builds_and_searches(
             [raft_entry_id],
             [cooking_entry_id],
         ]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_semantic_index_refresh_updates_reprocessed_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MARGINALIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SEMANTIC_RECALL_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "fake-key")
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "3")
+    monkeypatch.setenv("SEMANTIC_INDEX_BACKEND", "file")
+    from marginalia.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'refresh.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = _now()
+    raft_file_id = new_id()
+    raft_entry_id = new_id()
+    cooking_file_id = new_id()
+    cooking_entry_id = new_id()
+
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(bootstrap_schema_sync)
+
+        async with factory() as session:
+            session.add(File(
+                id=raft_file_id,
+                storage_key="00/aa/raft",
+                sha256="a" * 64,
+                size_bytes=10,
+                mime_type="text/plain",
+                original_ext=".txt",
+                kind="text",
+                summary="Raft consensus uses leader election.",
+                description={"sections": []},
+                extra="",
+                ingest_status="done",
+                ingested_at=now,
+                deleted_at=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            session.add(FileEntry(
+                id=raft_entry_id,
+                folder_id=None,
+                file_id=raft_file_id,
+                display_name="doc-a.txt",
+                lifecycle="active",
+                catalog_id=None,
+                extra="",
+                deleted_at=None,
+                purge_after=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            session.add(File(
+                id=cooking_file_id,
+                storage_key="00/aa/cooking",
+                sha256="b" * 64,
+                size_bytes=10,
+                mime_type="text/plain",
+                original_ext=".txt",
+                kind="text",
+                summary="Cooking notes for sourdough bread.",
+                description={"sections": []},
+                extra="",
+                ingest_status="done",
+                ingested_at=now,
+                deleted_at=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            session.add(FileEntry(
+                id=cooking_entry_id,
+                folder_id=None,
+                file_id=cooking_file_id,
+                display_name="doc-b.txt",
+                lifecycle="active",
+                catalog_id=None,
+                extra="",
+                deleted_at=None,
+                purge_after=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        async with factory() as session:
+            await build_semantic_index(
+                session,
+                client=_FakeEmbeddingClient(),
+                progress_every=0,
+            )
+
+        before = await search_semantic_index(
+            "leader election",
+            limit=1,
+            client=_FakeEmbeddingClient(),
+        )
+        assert [hit.entry_id for hit in before] == [raft_entry_id]
+
+        async with factory() as session:
+            file_row = await session.get(File, raft_file_id)
+            assert file_row is not None
+            file_row.summary = "Reprocessed notes about archival planning."
+            file_row.updated_at = _now()
+            await session.commit()
+
+        async with factory() as session:
+            result = await refresh_semantic_index_for_file(
+                session,
+                raft_file_id,
+                client=_FakeEmbeddingClient(),
+            )
+
+        assert result.skipped_reason is None
+        assert result.entries_removed == 1
+        assert result.entries_refreshed == 1
+        assert result.entries_total == 2
+
+        after = await search_semantic_index(
+            "leader election",
+            limit=1,
+            client=_FakeEmbeddingClient(),
+        )
+        assert [hit.entry_id for hit in after] != [raft_entry_id]
     finally:
         await engine.dispose()
 

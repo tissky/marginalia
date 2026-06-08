@@ -339,6 +339,7 @@ export interface ServerSettings {
   semantic_recall_enabled: boolean;
   semantic_recall_limit: number;
   semantic_recall_configured: boolean;
+  semantic_index: SemanticIndexStatus;
   rerank_enabled: boolean;
   rerank_api_key_set: boolean;
   rerank_base_url: string;
@@ -349,6 +350,27 @@ export interface ServerSettings {
   rerank_configured: boolean;
   evidence_selection: "quota" | "rerank";
   vision_profile_configured: boolean;
+}
+
+export interface SemanticIndexStatus {
+  index_name: string;
+  index_dir: string;
+  exists: boolean;
+  provider: string | null;
+  model: string | null;
+  dimensions: number | null;
+  entries: number;
+  configured_provider: string;
+  configured_model: string;
+  configured_dimensions: number;
+  compatible: boolean;
+  needs_rebuild: boolean;
+}
+
+export interface SemanticIndexRebuildResult {
+  task_id: string | null;
+  index_name: string;
+  status: SemanticIndexStatus;
 }
 
 export type LlmProfileName =

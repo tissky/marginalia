@@ -213,7 +213,9 @@ embedding 和 rerank 都是可选能力,不会隐式复用 chat / vision / inges
 API key。默认 embedding 配置面向百炼/DashScope 的 `text-embedding-v4`;
 如果安装 `sqlite-vec`,semantic index 会额外写入 `vectors.sqlite`,否则走文件
 索引 fallback。当前公开 CLI 的 semantic index 构建命令主要服务 eval 数据集;
-全库一键 semantic index 命令还没有暴露。
+普通库可在 GUI/API 中排队重建默认 semantic index,用于更换 embedding 模型或
+维度后的全量重嵌入。ingest 成功后也会在 semantic recall 已配置时刷新该文件的
+semantic 向量。
 
 ### 评测结论
 

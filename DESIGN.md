@@ -413,9 +413,10 @@ SEMANTIC_INDEX_BACKEND=auto        # auto, file, sqlite-vec
 ```
 
 The embedding profile is separate from `LLM_*`; no chat, ingest, or vision key
-is reused implicitly. The current public CLI builder is eval-dataset scoped.
-The internal index API can index arbitrary entry IDs, but a whole-library
-semantic-index command is not exposed yet.
+is reused implicitly. The public eval CLI builder is eval-dataset scoped. The
+GUI/API can enqueue a whole-library rebuild of the default semantic index when
+embedding provider/model/dimensions change, while successful ingest refreshes
+only the affected file's semantic vectors.
 
 Rerank is also opt-in:
 

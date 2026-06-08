@@ -184,9 +184,11 @@ default is Alibaba Cloud Model Studio / DashScope `text-embedding-v4`; set
 `EMBEDDING_API_KEY` before building. Embedding credentials are intentionally
 separate from `LLM_*` profiles. Semantic recall is optional and disabled by
 default; set `SEMANTIC_RECALL_ENABLED=true` to merge semantic candidates from
-the default semantic index with the lexical metadata recall path. The current
-CLI index builder targets imported eval datasets; a whole-library semantic
-index command is a follow-up integration point. If the optional `sqlite-vec`
+the default semantic index with the lexical metadata recall path. The eval CLI
+index builder targets imported datasets; the GUI/API can enqueue a whole-library
+semantic-index rebuild for the default index after embedding model or dimension
+changes. Ingest also refreshes the affected file's semantic vectors after a
+successful run when semantic recall is configured. If the optional `sqlite-vec`
 dependency is installed, the semantic index also writes `vectors.sqlite` and
 search uses it before falling back to the file index. Install with
 `pip install -e ".[semantic]"`, or set `SEMANTIC_INDEX_BACKEND=file` to keep

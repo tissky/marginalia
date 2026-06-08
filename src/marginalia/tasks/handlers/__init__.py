@@ -12,6 +12,7 @@ from marginalia.tasks.handlers import propose_views  # noqa: F401
 from marginalia.tasks.handlers import prune  # noqa: F401
 from marginalia.tasks.handlers import purge_deleted_files  # noqa: F401
 from marginalia.tasks.handlers import recover_stuck_tasks  # noqa: F401
+from marginalia.tasks.handlers import rebuild_semantic_index  # noqa: F401
 from marginalia.tasks.handlers import reflect_turn  # noqa: F401
 from marginalia.tasks.handlers import refresh_entry_extra  # noqa: F401
 from marginalia.tasks.handlers import restructure_catalogs  # noqa: F401

@@ -32,6 +32,7 @@ from marginalia.config import (
     resolve_profile,
 )
 from marginalia.llm.factory import reset_clients_cache
+from marginalia.semantic.index import semantic_index_status
 from marginalia.services.config_overlay import (
     OverlayValidationError, read_overlay, validate_and_normalize, write_overlay,
 )
@@ -86,6 +87,7 @@ def server_settings() -> dict[str, Any]:
         "semantic_recall_configured": bool(
             s.semantic_recall_enabled and s.embedding_api_key
         ),
+        "semantic_index": semantic_index_status(),
         "rerank_enabled": s.rerank_enabled,
         "rerank_api_key_set": bool(s.rerank_api_key),
         "rerank_base_url": s.rerank_base_url,
