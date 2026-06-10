@@ -1,6 +1,7 @@
 name: Release
 
-# Triggers on tags matching v*.*.* (for example v0.2.0).
+# Triggers on release tags such as v0.2.0 and prerelease tags such as
+# v0.2.4-rc.1.
 #
 # What it produces:
 #   - Tauri desktop bundles for Windows, macOS, and Linux. Each desktop
@@ -19,7 +20,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["v*.*.*", "v*.*.*-*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -225,7 +226,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || (github.event_name == 'workflow_dispatch' && !contains(github.event.inputs.tag, '-')) }}
 
       - name: Build & push
         uses: docker/build-push-action@v6
@@ -334,10 +335,14 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --yes
           fi
+          release_flags=(--latest)
+          if [[ "$TAG" == *-* ]]; then
+            release_flags=(--prerelease --latest=false)
+          fi
           gh release create "$TAG" release-assets/* \
             --title "Marginalia $TAG" \
             --notes-file release-notes.md \
-            --latest
+            "${release_flags[@]}"
 
       - name: Verify release assets
         env:
