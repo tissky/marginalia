@@ -108,6 +108,10 @@ def _ensure_test_env() -> None:
     os.environ.pop("LLM_DEFAULT_BASE_URL", None)
     os.environ.pop("MARGINALIA_API_TOKEN", None)
     os.environ.pop("RELATION_BACKGROUND_VETTING_ENABLED", None)
+    _TEST_ROOT.mkdir(parents=True, exist_ok=True)
+    (_TEST_ROOT / ".env").write_text("", encoding="utf-8")
+    os.chdir(_TEST_ROOT)
+    _Settings.model_config["env_file"] = None
     for var in (
         "EMBEDDING_PROVIDER",
         "EMBEDDING_API_KEY",

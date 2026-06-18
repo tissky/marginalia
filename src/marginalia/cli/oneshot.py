@@ -27,6 +27,7 @@ from marginalia.cli.commands import (
     _ExitREPL,
     dispatch,
     list_commands,
+    parse_reprocess_parts,
 )
 
 EMBEDDED_BASE_URL = "http://embedded"
@@ -399,6 +400,15 @@ async def _run_json_command(
             include_unvetted=include_unvetted,
         )
         payload["ok"] = True
+        return payload
+    if command_name == "reprocess":
+        try:
+            body, label = parse_reprocess_parts(args)
+        except ValueError as exc:
+            raise OneShotUsageError(str(exc)) from exc
+        payload = await ctx.client.reprocess_bulk(body)
+        payload["ok"] = True
+        payload["scope"] = label
         return payload
     if command_name in {"background", "bg"}:
         args, limit = _pop_int_option(args, "--limit", "-n", default=30)

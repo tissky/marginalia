@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+from sqlalchemy import text
+
 _TEST_PARENT = Path(os.environ.get(
     "MARGINALIA_TEST_TMP",
     str(Path(__file__).resolve().parent),
@@ -39,6 +41,8 @@ get_settings.cache_clear()  # type: ignore[attr-defined]
 
 from marginalia.cli.client import MarginaliaClient
 from marginalia.cli.oneshot import run_async
+from marginalia.db.bootstrap import bootstrap_schema
+from marginalia.db.engine import get_session_factory
 from marginalia.llm.types import ChatRequest, ChatResponse, TokenUsage
 from marginalia.main import app
 
@@ -82,6 +86,20 @@ async def _capture(client: MarginaliaClient, argv: list[str]) -> tuple[int, str]
     return rc, buf.getvalue()
 
 
+async def _create_schema() -> None:
+    await bootstrap_schema()
+
+
+async def _mark_file_failed(file_id: str) -> None:
+    factory = get_session_factory()
+    async with factory() as s:
+        await s.execute(
+            text("UPDATE files SET ingest_status='failed' WHERE id=:id"),
+            {"id": file_id},
+        )
+        await s.commit()
+
+
 async def main() -> None:
     fake = _FakeChat()
     _install_fake_chat(fake)
@@ -100,22 +118,33 @@ async def main() -> None:
             assert rc == 0, out
             uploaded = json.loads(out)
             assert uploaded["ok"] is True
+            file_id = uploaded["file_id"]
             entry_id = uploaded["entry_id"]
             print("[1] upload --json OK")
+
+            await _mark_file_failed(file_id)
+            rc, out = await _capture(client, ["reprocess", "failed", "--json"])
+            assert rc == 0, out
+            reprocessed = json.loads(out)
+            assert reprocessed["ok"] is True
+            assert reprocessed["file_count"] == 1
+            assert reprocessed["status_filter"] == "failed"
+            assert reprocessed["scope"] == "all files, status=failed"
+            print("[2] reprocess failed --json OK")
 
             rc, out = await _capture(client, ["search", "hello", "--json"])
             assert rc == 0, out
             search = json.loads(out)
             assert search["ok"] is True
             assert any(row["entry_id"] == entry_id for row in search["entries"])
-            print("[2] search --json OK")
+            print("[3] search --json OK")
 
             rc, out = await _capture(client, ["info", entry_id, "--json"])
             assert rc == 0, out
             info = json.loads(out)
             assert info["ok"] is True
             assert info["display_name"] == "hello world.md"
-            print("[3] info --json OK")
+            print("[4] info --json OK")
 
             rc, out = await _capture(client, ["check", "--json"])
             assert rc == 0, out
@@ -123,21 +152,21 @@ async def main() -> None:
             assert check["ok"] is True
             assert check["in_sync"] >= 1
             assert check["total_changes"] == 0
-            print("[4] check --json OK")
+            print("[5] check --json OK")
 
             rc, out = await _capture(client, ["ask", "summarize", "this", "--json"])
             assert rc == 0, out
             answer = json.loads(out)
             assert answer["ok"] is True
             assert "fake agent" in answer["answer"]
-            print("[5] ask --json OK")
+            print("[6] ask --json OK")
 
             second = _TEST_ROOT / "plain text upload.md"
             second.write_text("plain text mode", encoding="utf-8")
             rc, out = await _capture(client, ["upload", str(second), "/docs/plain text upload.md"])
             assert rc == 0, out
             assert "uploaded" in out
-            print("[6] text one-shot preserves spaced paths")
+            print("[7] text one-shot preserves spaced paths")
         finally:
             await client.aclose()
 

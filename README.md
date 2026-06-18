@@ -295,6 +295,7 @@ marginalia info <entry_id> --json
 marginalia discover <entry_id> --top-k 12 --json
 marginalia check --json
 marginalia ingest --all --yes --json
+marginalia reprocess failed --json
 ```
 
 One-shot commands use the same backend discovery model as the REPL: explicit
@@ -309,6 +310,8 @@ Slash commands:
 /upload <local> <remote>      upload a file or directory into the vault
 /check                        diff mirror vault vs database
 /ingest <path> | --all        sync manual vault edits into the database
+/reprocess failed             re-run ingest for failed files
+/reprocess folder <id> failed re-run failed files in one folder subtree
 /search <query>               metadata recall
 /info <entry_id>              entry metadata and preview
 /discover <entry_id> [N]      related entries from the evidence graph

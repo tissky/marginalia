@@ -127,6 +127,27 @@ async def _wait_for_status(file_id: str, *, expect: str,
     raise TimeoutError(f"file status stayed not {expect}")
 
 
+async def _wait_for_task_status(
+    task_id: str, *, expect: str, timeout: float = 12.0,
+) -> tuple[str | None, str]:
+    factory = get_session_factory()
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        async with factory() as s:
+            row = (await s.execute(text(
+                "SELECT locked_by, status FROM tasks WHERE id=:id"
+            ), {"id": task_id})).first()
+            if row is None:
+                raise RuntimeError("task vanished")
+            locked_by, status = row
+            if status == expect:
+                return locked_by, status
+            if status in ("done", "dead"):
+                return locked_by, status
+        await asyncio.sleep(0.05)
+    raise TimeoutError(f"task status stayed not {expect}")
+
+
 async def main() -> None:
     _install_fake()
     await _create_schema()
@@ -189,10 +210,7 @@ async def main() -> None:
                 print("[4] file content fields written + entry classified")
 
                 # --- 5. locked_by reflects this worker_id ----------
-                async with factory() as s:
-                    rows = (await s.execute(text(
-                        "SELECT locked_by, status FROM tasks WHERE id=:id"
-                    ), {"id": task_id})).first()
+                rows = await _wait_for_task_status(task_id, expect="done")
                 # After done, locked_by should be cleared
                 print("[5] post-done task row:", rows)
                 assert rows[1] == "done"

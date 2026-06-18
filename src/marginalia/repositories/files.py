@@ -71,12 +71,17 @@ async def update_storage_key(
     )
 
 
-async def list_live_ids(db: AsyncSession) -> list[str]:
+async def list_live_ids(
+    db: AsyncSession, *, ingest_status: str | None = None,
+) -> list[str]:
     """Every live file id, oldest first. Used by reprocess `all=true`."""
+    conditions = [File.deleted_at.is_(None)]
+    if ingest_status is not None:
+        conditions.append(File.ingest_status == ingest_status)
     rows = (
         await db.execute(
             select(File.id)
-            .where(File.deleted_at.is_(None))
+            .where(*conditions)
             .order_by(File.created_at.asc())
         )
     ).scalars().all()
@@ -84,22 +89,28 @@ async def list_live_ids(db: AsyncSession) -> list[str]:
 
 
 async def list_live_ids_in_catalogs(
-    db: AsyncSession, catalog_ids: list[str],
+    db: AsyncSession,
+    catalog_ids: list[str],
+    *,
+    ingest_status: str | None = None,
 ) -> list[str]:
     """Distinct live file ids whose live entries sit in any of the given
     catalogs. Used by reprocess catalog-subtree filter — caller expands
     the subtree via catalogs_repo.expand_subtree first."""
     if not catalog_ids:
         return []
+    conditions = [
+        FileEntry.catalog_id.in_(catalog_ids),
+        FileEntry.deleted_at.is_(None),
+        File.deleted_at.is_(None),
+    ]
+    if ingest_status is not None:
+        conditions.append(File.ingest_status == ingest_status)
     rows = (
         await db.execute(
             select(File.id)
             .join(FileEntry, FileEntry.file_id == File.id)
-            .where(
-                FileEntry.catalog_id.in_(catalog_ids),
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
+            .where(*conditions)
             .distinct()
         )
     ).scalars().all()
@@ -107,22 +118,28 @@ async def list_live_ids_in_catalogs(
 
 
 async def list_live_ids_in_folders(
-    db: AsyncSession, folder_ids: list[str],
+    db: AsyncSession,
+    folder_ids: list[str],
+    *,
+    ingest_status: str | None = None,
 ) -> list[str]:
     """Distinct live file ids whose live entries sit in any of the given
     folders. Used by reprocess folder-scoped filter — caller has already
     walked any folder subtree."""
     if not folder_ids:
         return []
+    conditions = [
+        FileEntry.folder_id.in_(folder_ids),
+        FileEntry.deleted_at.is_(None),
+        File.deleted_at.is_(None),
+    ]
+    if ingest_status is not None:
+        conditions.append(File.ingest_status == ingest_status)
     rows = (
         await db.execute(
             select(File.id)
             .join(FileEntry, FileEntry.file_id == File.id)
-            .where(
-                FileEntry.folder_id.in_(folder_ids),
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
+            .where(*conditions)
             .distinct()
         )
     ).scalars().all()
@@ -130,21 +147,27 @@ async def list_live_ids_in_folders(
 
 
 async def list_live_ids_with_tag(
-    db: AsyncSession, tag_id: str,
+    db: AsyncSession,
+    tag_id: str,
+    *,
+    ingest_status: str | None = None,
 ) -> list[str]:
     """Distinct live file ids whose live entries carry `tag_id`. Used by
     reprocess tag filter."""
     from marginalia.db.models import EntryTag  # local — keep top imports tight
+    conditions = [
+        EntryTag.tag_id == tag_id,
+        FileEntry.deleted_at.is_(None),
+        File.deleted_at.is_(None),
+    ]
+    if ingest_status is not None:
+        conditions.append(File.ingest_status == ingest_status)
     rows = (
         await db.execute(
             select(File.id)
             .join(FileEntry, FileEntry.file_id == File.id)
             .join(EntryTag, EntryTag.entry_id == FileEntry.id)
-            .where(
-                EntryTag.tag_id == tag_id,
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
+            .where(*conditions)
             .distinct()
         )
     ).scalars().all()

@@ -12,7 +12,7 @@ import json
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, MutableMapping, cast
+from typing import Any, Awaitable, Callable, MutableMapping, cast
 
 from marginalia.agent.types import ChatMode
 from marginalia.cli.client import CliHttpError, MarginaliaClient
@@ -470,6 +470,156 @@ async def cmd_discover(ctx: CliContext, args: str) -> None:
         f"\n  {len(results)} related entries  "
         f"(* = direct edge from seed)"
     )
+
+
+_REPROCESS_STATUSES = {"pending", "processing", "done", "failed"}
+_REPROCESS_USAGE = (
+    "usage: /reprocess failed | all [failed] | folder <folder_id> [failed] | "
+    "catalog <catalog_id> [failed] | tag <tag_id> [failed] | "
+    "file <file_id> | files <file_id>..."
+)
+
+
+def _parse_reprocess_status(raw: str) -> str:
+    status = raw.strip().lower()
+    if status not in _REPROCESS_STATUSES:
+        raise ValueError(
+            "status must be one of " + ", ".join(sorted(_REPROCESS_STATUSES))
+        )
+    return status
+
+
+def _merge_reprocess_status(existing: str | None, raw: str) -> str:
+    status = _parse_reprocess_status(raw)
+    if existing is not None and existing != status:
+        raise ValueError(f"conflicting status filters: {existing!r} and {status!r}")
+    return status
+
+
+def _pop_reprocess_status_options(parts: list[str]) -> tuple[list[str], str | None]:
+    out: list[str] = []
+    status: str | None = None
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--status":
+            i += 1
+            if i >= len(parts):
+                raise ValueError("--status requires a value")
+            status = _merge_reprocess_status(status, parts[i])
+        elif part.startswith("--status="):
+            status = _merge_reprocess_status(status, part.split("=", 1)[1])
+        else:
+            out.append(part)
+        i += 1
+    return out, status
+
+
+def parse_reprocess_parts(parts: list[str]) -> tuple[dict[str, Any], str]:
+    parts, status = _pop_reprocess_status_options(parts)
+    if not parts:
+        if status is None:
+            raise ValueError(_REPROCESS_USAGE)
+        body: dict[str, Any] = {"status": status}
+        return body, _reprocess_scope_label(body)
+
+    first = parts[0].lower()
+    if len(parts) == 1 and first in _REPROCESS_STATUSES:
+        status = _merge_reprocess_status(status, first)
+        body = {"status": status}
+        return body, _reprocess_scope_label(body)
+
+    tail: list[str] = []
+    if first == "all":
+        body = {"all": True}
+        tail = parts[1:]
+    elif first == "folder":
+        if len(parts) < 2:
+            raise ValueError("missing folder_id")
+        body = {"folder_id": parts[1]}
+        tail = parts[2:]
+    elif first == "catalog":
+        if len(parts) < 2:
+            raise ValueError("missing catalog_id")
+        body = {"catalog_id": parts[1]}
+        tail = parts[2:]
+    elif first == "tag":
+        if len(parts) < 2:
+            raise ValueError("missing tag_id")
+        body = {"tag_id": parts[1]}
+        tail = parts[2:]
+    elif first in {"file", "files"}:
+        ids = parts[1:]
+        if ids and ids[-1].lower() in _REPROCESS_STATUSES:
+            status = _merge_reprocess_status(status, ids.pop())
+        if not ids:
+            raise ValueError("missing file_id")
+        body = {"file_ids": ids}
+    elif len(parts) == 1:
+        body = {"file_ids": [parts[0]]}
+    else:
+        raise ValueError(_REPROCESS_USAGE)
+
+    for token in tail:
+        if token.lower() in _REPROCESS_STATUSES:
+            status = _merge_reprocess_status(status, token)
+        else:
+            raise ValueError(f"unexpected argument: {token}")
+    if status is not None:
+        body["status"] = status
+    return body, _reprocess_scope_label(body)
+
+
+def _reprocess_scope_label(body: dict[str, Any]) -> str:
+    if body.get("all"):
+        scope = "all files"
+    elif body.get("folder_id"):
+        scope = f"folder {body['folder_id']}"
+    elif body.get("catalog_id"):
+        scope = f"catalog {body['catalog_id']}"
+    elif body.get("tag_id"):
+        scope = f"tag {body['tag_id']}"
+    elif body.get("file_ids"):
+        count = len(body["file_ids"])
+        scope = f"{count} file" + ("" if count == 1 else "s")
+    else:
+        scope = "all files"
+    status = body.get("status")
+    return f"{scope}, status={status}" if status else scope
+
+
+def _print_reprocess_result(out: dict[str, Any], label: str) -> None:
+    file_count = int(out.get("file_count") or 0)
+    task_ids = out.get("task_ids") or []
+    reused_count = int(out.get("reused_count") or 0)
+    skipped_count = int(out.get("skipped_count") or 0)
+    if file_count == 0:
+        print(f"no matching files to reprocess ({label})")
+        return
+    print(
+        f"reprocess queued: {file_count} file(s), {len(task_ids)} task(s)"
+        f"  ({label})"
+    )
+    if reused_count or skipped_count:
+        print(f"  reused={reused_count} skipped={skipped_count}")
+
+
+@command("reprocess")
+async def cmd_reprocess(ctx: CliContext, args: str) -> None:
+    """Re-run ingest for files: failed, all, folder <id>, tag <id>, or file <id>."""
+    try:
+        body, label = parse_reprocess_parts(_split_args(args))
+    except ValueError as e:
+        print(str(e))
+        if str(e) != _REPROCESS_USAGE:
+            print(_REPROCESS_USAGE)
+        return
+    try:
+        out = await ctx.client.reprocess_bulk(body)
+    except CliHttpError as e:
+        print(f"reprocess failed: HTTP {e.status} {e.payload}")
+        return
+    _print_reprocess_result(out, label)
 
 
 @command("export")

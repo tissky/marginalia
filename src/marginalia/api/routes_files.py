@@ -24,6 +24,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import File
+from marginalia.db.models.enums import INGEST_STATUSES
 from marginalia.db.session import get_session
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import files as files_repo
@@ -70,19 +71,30 @@ class BulkReprocessBody(BaseModel):
     folder_id: str | None = None
     tag_id: str | None = None
     all: bool = False
+    status: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> "BulkReprocessBody":
-        set_count = sum([
+        scope_count = sum([
             self.file_ids is not None,
             self.catalog_id is not None,
             self.folder_id is not None,
             self.tag_id is not None,
             self.all,
         ])
-        if set_count != 1:
+        if self.status is not None:
+            self.status = self.status.strip().lower()
+            if self.status not in INGEST_STATUSES:
+                raise ValueError(
+                    "status must be one of " + ", ".join(INGEST_STATUSES)
+                )
+        if scope_count == 0 and self.status is None:
             raise ValueError(
-                "exactly one of {file_ids, catalog_id, folder_id, tag_id, all} required"
+                "one of {file_ids, catalog_id, folder_id, tag_id, all, status} required"
+            )
+        if scope_count > 1:
+            raise ValueError(
+                "at most one of {file_ids, catalog_id, folder_id, tag_id, all} allowed"
             )
         if self.file_ids is not None and not self.file_ids:
             raise ValueError("file_ids must be non-empty")
@@ -94,24 +106,30 @@ async def _resolve_file_ids(
 ) -> list[str]:
     if body.file_ids is not None:
         # Filter to live ids — caller may have cached stale ids.
-        rows = await files_repo.list_live_ids(session)
+        rows = await files_repo.list_live_ids(
+            session, ingest_status=body.status,
+        )
         live = set(rows)
         return [fid for fid in body.file_ids if fid in live]
     if body.catalog_id is not None:
         subtree = await catalogs_repo.expand_subtree(session, body.catalog_id)
-        return await files_repo.list_live_ids_in_catalogs(session, subtree)
+        return await files_repo.list_live_ids_in_catalogs(
+            session, subtree, ingest_status=body.status,
+        )
     if body.folder_id is not None:
         # Walk folder subtree, then scope file_entries by folder.
         descendants = await folders_repo.list_live_descendant_ids(
             session, body.folder_id,
         )
         return await files_repo.list_live_ids_in_folders(
-            session, [body.folder_id, *descendants],
+            session, [body.folder_id, *descendants], ingest_status=body.status,
         )
     if body.tag_id is not None:
-        return await files_repo.list_live_ids_with_tag(session, body.tag_id)
-    if body.all:
-        return await files_repo.list_live_ids(session)
+        return await files_repo.list_live_ids_with_tag(
+            session, body.tag_id, ingest_status=body.status,
+        )
+    if body.all or body.status is not None:
+        return await files_repo.list_live_ids(session, ingest_status=body.status)
     return []
 
 
@@ -122,7 +140,13 @@ async def reprocess_bulk(
 ) -> dict[str, Any]:
     file_ids = await _resolve_file_ids(session, body)
     if not file_ids:
-        return {"file_count": 0, "task_ids": [], "reused_count": 0, "skipped_count": 0}
+        return {
+            "file_count": 0,
+            "task_ids": [],
+            "reused_count": 0,
+            "skipped_count": 0,
+            "status_filter": body.status,
+        }
     if len(file_ids) > _BULK_MAX:
         raise HTTPException(
             status_code=413,
@@ -153,4 +177,5 @@ async def reprocess_bulk(
         "task_ids": task_ids,
         "reused_count": reused_count,
         "skipped_count": skipped_count,
+        "status_filter": body.status,
     }

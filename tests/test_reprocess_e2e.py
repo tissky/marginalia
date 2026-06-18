@@ -13,7 +13,8 @@ entry_relations, and re-enqueues KIND_INGEST_FILE. This test locks in:
      run are present.
   5. Bulk reprocess by file_ids enqueues for every listed file.
   6. Bulk by `all=true` covers live files only (skips deleted).
-  7. Body validation: 422 on zero or multiple filters.
+  7. Bulk status filter can target only failed files inside a folder.
+  8. Body validation: 422 on zero or multiple filters.
 
 Run:
     .venv/Scripts/python tests/test_reprocess_e2e.py
@@ -218,6 +219,7 @@ async def main() -> None:
                 _FAKE.responses.append(_payload("first summary", "alpha"))
                 up = await _upload_md(c, "/notes/a.md", b"# A\n\ntext\n")
                 file_id, entry_id = up["file_id"], up["entry_id"]
+                folder_id = up["folder_id"]
                 first_task = await _latest_ingest_task_id(file_id)
                 assert await _wait_for_task_done(first_task) == "done"
 
@@ -371,6 +373,41 @@ async def main() -> None:
                     assert await _wait_for_task_done(tid) == "done"
                 print("[6] bulk all=true: deleted files excluded")
 
+                # ---- status filter: folder subtree + failed only ----
+                _FAKE.responses.append(_payload("doc3 first", "eta"))
+                up3 = await _upload_md(c, "/notes/c.md", b"# C\n\nmore\n")
+                file_id3 = up3["file_id"]
+                t3 = await _latest_ingest_task_id(file_id3)
+                assert await _wait_for_task_done(t3) == "done"
+
+                async with factory() as s:
+                    await s.execute(
+                        text(
+                            "UPDATE files SET ingest_status='failed', "
+                            "ingested_at = NULL WHERE id = :id"
+                        ),
+                        {"id": file_id},
+                    )
+                    await s.commit()
+
+                _FAKE.responses.append(_payload("REDONE failed only", "theta"))
+                r = await c.post(
+                    "/v1/files/reprocess",
+                    json={"folder_id": folder_id, "status": "failed"},
+                )
+                assert r.status_code == 200, r.text
+                rb = r.json()
+                assert rb["file_count"] == 1, f"expected only failed file, got {rb}"
+                assert rb["status_filter"] == "failed"
+                assert len(rb["task_ids"]) == 1, f"task_ids: {rb}"
+                assert await _wait_for_task_done(rb["task_ids"][0]) == "done"
+                async with factory() as s:
+                    s1 = (await s.get(File, file_id)).summary
+                    s3 = (await s.get(File, file_id3)).summary
+                    assert s1 == "REDONE failed only", s1
+                    assert s3 == "doc3 first", s3
+                print("[7] bulk folder+status: only failed files reprocessed")
+
                 # ---- body validation ----
                 r = await c.post("/v1/files/reprocess", json={})
                 assert r.status_code == 422, r.text
@@ -381,7 +418,10 @@ async def main() -> None:
                 assert r.status_code == 422, r.text
                 r = await c.post("/v1/files/reprocess", json={"file_ids": []})
                 assert r.status_code == 422, r.text
-                print("[7] body validation: 0 / 2+ filters / empty file_ids → 422")
+
+                r = await c.post("/v1/files/reprocess", json={"status": "bogus"})
+                assert r.status_code == 422, r.text
+                print("[8] body validation: invalid bodies return 422")
 
         finally:
             await runner.stop()

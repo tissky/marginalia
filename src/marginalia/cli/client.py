@@ -213,6 +213,18 @@ class MarginaliaClient:
             raise CliHttpError(r.status_code, r.json() if _is_json(r) else r.text)
         return r.json()
 
+    async def reprocess_file(self, file_id: str) -> dict[str, Any]:
+        r = await self._http.post(f"/v1/files/{file_id}/reprocess")
+        if r.status_code >= 400:
+            raise CliHttpError(r.status_code, r.json() if _is_json(r) else r.text)
+        return r.json()
+
+    async def reprocess_bulk(self, body: dict[str, Any]) -> dict[str, Any]:
+        r = await self._http.post("/v1/files/reprocess", json=body)
+        if r.status_code >= 400:
+            raise CliHttpError(r.status_code, r.json() if _is_json(r) else r.text)
+        return r.json()
+
     async def get_entry_metadata(self, entry_id: str) -> dict[str, Any]:
         r = await self._http.get(f"/v1/file-entries/{entry_id}/metadata")
         if r.status_code >= 400:
