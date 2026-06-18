@@ -106,6 +106,8 @@ jobs:
 
       - name: Build bundles
         working-directory: desktop
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: npm run tauri:build -- ${{ matrix.tauri_args }}
 
       - name: Package Windows portable zip
