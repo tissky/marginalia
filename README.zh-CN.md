@@ -49,6 +49,11 @@ Marginalia 是本地优先的个人研究 agent。它把杂乱的私有文件整
 所以 Windows SmartScreen 或 macOS Gatekeeper 第一次打开时可能会要求手动
 确认。
 
+Linux `.deb` 和 `.rpm` 还会安装 CLI wrapper,它们使用包内置的 Python
+runtime,并和桌面端共用同一个 `MARGINALIA_HOME`。因此无需另装系统 Python
+包,就可以直接运行 `marginalia`、`marginalia serve`、`marginalia mcp`、
+`marginalia-mcp` 和 `marginalia-worker`。
+
 - **Windows**: 如果 SmartScreen 拦截,点 **更多信息** -> **仍要运行**。
 - **macOS**: 把 App 拖到 `/Applications` 后,如果提示 App 已损坏或无法验证,
   运行 `xattr -dr com.apple.quarantine /Applications/Marginalia.app`。
@@ -94,8 +99,8 @@ marginalia> 比较一下 raft 和 paxos
 `marginalia` 命令是单进程——server / worker / CLI 全在里面,不需要开
 第二个终端。第一次启动会自动初始化数据库 schema,不需要手动跑 migration。
 
-如果希望桌面端、CLI、MCP 或外部自动化共用同一个后端,启动可复用的 HTTP
-后端:
+如果希望桌面端、CLI、MCP、通过 skill 驱动的自动化或外部 HTTP 客户端共用
+同一个后端,启动可复用的 HTTP 后端:
 
 ```bash
 marginalia serve
@@ -104,7 +109,8 @@ marginalia serve
 `marginalia serve` 会读取 `.env` 里的 `MARGINALIA_API_HOST` 和
 `MARGINALIA_API_PORT`,并把当前实际 URL 写到
 `MARGINALIA_HOME/runtime/server.json`。桌面端和 CLI 会自动发现这个文件;
-显式传入 `--server URL` 或设置 `MARGINALIA_SERVER` 时仍然优先使用显式配置。
+skill 只要调用 `marginalia` CLI,也会继承这套发现逻辑。显式传入
+`--server URL` 或设置 `MARGINALIA_SERVER` 时仍然优先使用显式配置。
 
 默认你的文件以真实文件夹形式存在 `~/Marginalia/library/...` 下。可以
 在 Finder 里浏览、用 `rsync` / `git` 备份、用任何编辑器修改——库就是
@@ -184,11 +190,16 @@ marginalia mcp
 marginalia-mcp
 ```
 
-MCP 面只暴露只读检索工具,包括 `recall_knowledge`、`search_metadata`、
-`search_journal`、`read_entries_metadata`、`read_files`、`list_folder`、
-`list_catalogs`、`read_catalog`、`resolve_tag` 和 `materialize_view`。
-写入类工具和生成 artifact 的工具不会暴露。MCP 客户端配置里使用和 CLI
+MCP server 使用和 CLI 相同的后端发现模型:显式 `--server URL`,然后是
+`MARGINALIA_SERVER`,再读取 `MARGINALIA_HOME/runtime/server.json`,如果没有
+正在运行的后端,最后启动 embedded backend。MCP 客户端配置里使用和 CLI
 相同的 `MARGINALIA_HOME`、数据库、存储以及可选 provider 环境变量即可。
+
+MCP 会暴露结构化 workflow tools,包括 `ask_marginalia`、`upload_file`、
+`download_file`、`download_folder`、`export_conversation`、`search_files`、
+`get_file_metadata`,以及检索/读取工具 `recall_knowledge`、
+`search_metadata`、`search_journal`、`read_entries_metadata` 和
+`read_files`。
 
 一次对话 turn 渲染成事件流:
 

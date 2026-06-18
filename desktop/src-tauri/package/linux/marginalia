@@ -1,0 +1,60 @@
+#!/usr/bin/env sh
+set -eu
+
+# CLI entry point for Linux desktop packages. It runs the Python package
+# embedded in the Tauri resources, so users do not need system Python.
+
+if [ -z "${MARGINALIA_HOME:-}" ]; then
+  export MARGINALIA_HOME="${HOME}/Marginalia"
+fi
+
+find_backend() {
+  if [ -n "${MARGINALIA_BUNDLED_BACKEND:-}" ] && [ -d "${MARGINALIA_BUNDLED_BACKEND}" ]; then
+    printf '%s\n' "${MARGINALIA_BUNDLED_BACKEND}"
+    return 0
+  fi
+
+  for dir in \
+    "${APPDIR:-}/usr/lib/marginalia-tauri/resources/backend" \
+    "${APPDIR:-}/usr/lib/marginalia/resources/backend" \
+    "${APPDIR:-}/usr/lib/Marginalia/resources/backend" \
+    "${APPDIR:-}/resources/backend" \
+    "/usr/lib/marginalia-tauri/resources/backend" \
+    "/usr/lib/marginalia/resources/backend" \
+    "/usr/lib/Marginalia/resources/backend" \
+    "/opt/Marginalia/resources/backend"
+  do
+    if [ -n "${dir}" ] && [ -d "${dir}" ]; then
+      printf '%s\n' "${dir}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+backend="$(find_backend)" || {
+  echo "marginalia: cannot find bundled backend runtime" >&2
+  exit 127
+}
+
+python=""
+for candidate in "${backend}/bin/python3" "${backend}/bin/python" "${backend}/python"; do
+  if [ -x "${candidate}" ]; then
+    python="${candidate}"
+    break
+  fi
+done
+
+if [ -z "${python}" ]; then
+  echo "marginalia: cannot find bundled Python under ${backend}" >&2
+  exit 127
+fi
+
+if [ -z "${PYTHONHOME:-}" ]; then
+  export PYTHONHOME="${backend}"
+fi
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+
+module="${MARGINALIA_PY_MODULE:-marginalia.cli.repl}"
+exec "${python}" -m "${module}" "$@"

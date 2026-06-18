@@ -30,6 +30,11 @@ async def test_mcp_initialize_and_lists_readonly_tools() -> None:
         "search_metadata",
         "search_journal",
         "read_entries_metadata",
+        "ask_marginalia",
+        "upload_file",
+        "download_file",
+        "download_folder",
+        "export_conversation",
     ):
         assert name in tools
         assert "inputSchema" in tools[name]
@@ -82,6 +87,107 @@ async def test_mcp_call_invokes_registered_tool(monkeypatch: pytest.MonkeyPatch)
     assert payload["conversation_id"].startswith("mcp-")
     assert calls[0][0] == "db-session"
     assert calls[0][1].session_id == "mcp"
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_uses_explicit_http_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_http_call(
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        base_url: str,
+        api_token: str | None,
+    ) -> dict[str, Any]:
+        calls.append(
+            {
+                "name": name,
+                "arguments": arguments,
+                "base_url": base_url,
+                "api_token": api_token,
+            }
+        )
+        return {
+            "content": [{"type": "text", "text": json.dumps({"ok": True})}],
+            "isError": False,
+        }
+
+    monkeypatch.setattr(mcp_server, "_call_mcp_tool_http", fake_http_call)
+
+    response = await mcp_server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "call-http",
+            "method": "tools/call",
+            "params": {
+                "name": "search_journal",
+                "arguments": {"text": "policy", "limit": 3},
+            },
+        },
+        server_url="http://127.0.0.1:8123/",
+        api_token="secret",
+    )
+
+    assert response is not None
+    assert response["id"] == "call-http"
+    assert response["result"]["isError"] is False
+    assert calls == [
+        {
+            "name": "search_journal",
+            "arguments": {"text": "policy", "limit": 3},
+            "base_url": "http://127.0.0.1:8123",
+            "api_token": "secret",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_workflow_call_uses_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[Any, str, dict[str, Any]]] = []
+
+    class FakeBackend:
+        async def client(self) -> str:
+            return "backend-client"
+
+    async def fake_workflow_call(
+        client: Any,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        calls.append((client, name, arguments))
+        return {
+            "content": [{"type": "text", "text": json.dumps({"saved": True})}],
+            "isError": False,
+        }
+
+    monkeypatch.setattr(mcp_server, "_call_workflow_tool_http", fake_workflow_call)
+
+    response = await mcp_server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "upload",
+            "method": "tools/call",
+            "params": {
+                "name": "upload_file",
+                "arguments": {
+                    "local_path": "notes.pdf",
+                    "remote_path": "/papers/notes.pdf",
+                },
+            },
+        },
+        backend=FakeBackend(),
+    )
+
+    assert response is not None
+    assert response["result"]["isError"] is False
+    assert calls == [
+        (
+            "backend-client",
+            "upload_file",
+            {"local_path": "notes.pdf", "remote_path": "/papers/notes.pdf"},
+        )
+    ]
 
 
 @pytest.mark.asyncio

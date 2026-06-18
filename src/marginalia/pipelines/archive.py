@@ -88,7 +88,7 @@ _EXT_TO_MIME: dict[str, str] = {
     ".gif": "image/gif", ".webp": "image/webp",
     ".py": "text/x-python", ".js": "text/javascript", ".ts": "text/typescript",
     ".json": "application/json", ".yaml": "text/yaml", ".yml": "text/yaml",
-    ".toml": "text/x-toml", ".xml": "text/xml",
+    ".toml": "text/x-toml", ".xml": "text/xml", ".svg": "image/svg+xml",
 }
 
 

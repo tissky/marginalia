@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
@@ -284,6 +285,27 @@ def _default_home() -> str:
     return str(Path.home() / "Marginalia")
 
 
+def _settings_env_file() -> str:
+    """Prefer project-local `.env`, then the desktop/global home `.env`.
+
+    Editable installs historically read `.env` from the caller's working
+    directory. Packaged desktop CLI wrappers are commonly launched from any
+    shell directory, so they need the starter `.env` under MARGINALIA_HOME.
+    """
+    from pathlib import Path
+
+    cwd_env = Path(".env")
+    if cwd_env.is_file():
+        return str(cwd_env)
+
+    home = os.environ.get("MARGINALIA_HOME") or _default_home()
+    home_env = Path(home).expanduser() / ".env"
+    if home_env.is_file():
+        return str(home_env)
+
+    return ".env"
+
+
 def _resolve_paths(settings: "Settings") -> None:
     """In-place: resolve `marginalia_home` to an absolute path and ensure
     it exists.
@@ -303,7 +325,7 @@ def _resolve_paths(settings: "Settings") -> None:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    s = Settings()
+    s = Settings(_env_file=_settings_env_file())
     _resolve_paths(s)
     # Merge the GUI-writable overlay (config_overlay.json under
     # MARGINALIA_HOME) so its values take precedence over .env. Imported

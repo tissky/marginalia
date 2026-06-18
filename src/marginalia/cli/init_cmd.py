@@ -134,7 +134,7 @@ def render_report(cwd: Path, artifacts: list[_Artifact]) -> str:
     lines.append("")
     lines.append("Next steps:")
     lines.append("  1. Edit .env and set LLM_DEFAULT_API_KEY (or per-profile keys).")
-    lines.append("  2. Start the API:            uvicorn marginalia.main:app")
+    lines.append("  2. Start the backend:        marginalia serve")
     lines.append("  3. (Production) start the worker:  marginalia-worker")
     lines.append("  4. Open the CLI:             marginalia")
     lines.append("")

@@ -39,9 +39,9 @@ def main(argv: list[str] | None = None, *, prog: str = "marginalia serve") -> in
     parser = build_arg_parser(prog=prog)
     args = parser.parse_args(args_list)
 
-    from marginalia.config import Settings
+    from marginalia.config import get_settings
 
-    settings = Settings()
+    settings = get_settings()
     host = args.host or settings.marginalia_api_host
     port = int(args.port or settings.marginalia_api_port)
     log_level = args.log_level or os.environ.get("MARGINALIA_API_LOG_LEVEL", "info")

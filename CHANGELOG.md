@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added
+
+- Linux desktop `.deb` / `.rpm` bundles now expose `marginalia`,
+  `marginalia-mcp`, and `marginalia-worker` CLI wrappers backed by the bundled
+  Python runtime.
+- `marginalia mcp` now follows CLI backend discovery and exposes structured
+  workflow tools for asking Marginalia, upload, download, export, search, and
+  metadata reads.
+
+### Changed
+
+- SVG files now route through the text/XML pipeline instead of the raster image
+  pipeline, avoiding native rasterization dependencies while preserving
+  searchable SVG structure and labels.
+
 ## 0.2.5 - 2026-06-18
 
 ### Added

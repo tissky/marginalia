@@ -58,6 +58,12 @@ The desktop builds bundle their own Python runtime. They are currently unsigned,
 so Windows SmartScreen or macOS Gatekeeper may ask you to confirm the first
 launch.
 
+Linux `.deb` and `.rpm` packages also install CLI wrappers backed by the
+bundled Python runtime. They share the same `MARGINALIA_HOME` as the desktop
+app, so `marginalia`, `marginalia serve`, `marginalia mcp`,
+`marginalia-mcp`, and `marginalia-worker` work without installing a separate
+system Python package.
+
 - **Windows**: click **More info** -> **Run anyway** if SmartScreen blocks the
   first launch.
 - **macOS**: after dragging the app to `/Applications`, run
@@ -108,8 +114,8 @@ marginalia> /export
 
 The first launch bootstraps the database schema automatically.
 
-To share one backend across the desktop app, CLI sessions, MCP, or external
-automation, start the reusable HTTP backend instead:
+To share one backend across the desktop app, CLI sessions, MCP, skill-driven
+automation, or external HTTP clients, start the reusable HTTP backend instead:
 
 ```bash
 marginalia serve
@@ -117,8 +123,9 @@ marginalia serve
 
 `marginalia serve` reads `MARGINALIA_API_HOST` and `MARGINALIA_API_PORT` from
 `.env` and writes its live URL to `MARGINALIA_HOME/runtime/server.json`.
-Desktop and CLI clients auto-discover that file; explicit `--server URL` or
-`MARGINALIA_SERVER` still take precedence.
+Desktop and CLI clients auto-discover that file; skills inherit this when they
+drive the `marginalia` CLI. Explicit `--server URL` or `MARGINALIA_SERVER`
+still take precedence.
 
 ## Example Questions
 
@@ -303,12 +310,18 @@ marginalia mcp
 marginalia-mcp
 ```
 
-The MCP surface is read-only. It exposes retrieval and source-reading tools
-such as `recall_knowledge`, `search_metadata`, `search_journal`,
-`read_entries_metadata`, and `read_files`, while write-side and generated
-artifact tools are not exposed. A Claude Desktop-style command entry can point
-at the same executable and set `MARGINALIA_HOME` / database settings through
-the environment.
+The MCP server uses the same backend discovery model as the CLI: explicit
+`--server URL`, then `MARGINALIA_SERVER`, then
+`MARGINALIA_HOME/runtime/server.json`, and finally an embedded backend if
+nothing is already running. A Claude Desktop-style command entry can point at
+the same executable and set `MARGINALIA_HOME` / database settings through the
+environment.
+
+MCP exposes structured workflow tools including `ask_marginalia`,
+`upload_file`, `download_file`, `download_folder`, `export_conversation`,
+`search_files`, `get_file_metadata`, plus retrieval/source-reading tools such
+as `recall_knowledge`, `search_metadata`, `search_journal`,
+`read_entries_metadata`, and `read_files`.
 
 ## API Surface
 

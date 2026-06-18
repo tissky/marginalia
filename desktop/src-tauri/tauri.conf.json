@@ -39,6 +39,29 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "linux": {
+      "deb": {
+        "files": {
+          "package/linux/marginalia": "/usr/bin/marginalia",
+          "package/linux/marginalia-mcp": "/usr/bin/marginalia-mcp",
+          "package/linux/marginalia-worker": "/usr/bin/marginalia-worker"
+        }
+      },
+      "rpm": {
+        "files": {
+          "package/linux/marginalia": "/usr/bin/marginalia",
+          "package/linux/marginalia-mcp": "/usr/bin/marginalia-mcp",
+          "package/linux/marginalia-worker": "/usr/bin/marginalia-worker"
+        }
+      },
+      "appimage": {
+        "files": {
+          "package/linux/marginalia": "usr/bin/marginalia",
+          "package/linux/marginalia-mcp": "usr/bin/marginalia-mcp",
+          "package/linux/marginalia-worker": "usr/bin/marginalia-worker"
+        }
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
