@@ -10,6 +10,8 @@
  * over saturation. Don't add a second accent without a reason.
  */
 :root {
+  color-scheme: light;
+
   --bg-base: 255 255 255;
   --bg-subtle: 250 250 251;
   --bg-muted: 244 244 245;
@@ -31,6 +33,8 @@
 }
 
 .dark {
+  color-scheme: dark;
+
   --bg-base: 9 9 11;          /* zinc-950 */
   --bg-subtle: 17 17 19;
   --bg-muted: 24 24 27;
