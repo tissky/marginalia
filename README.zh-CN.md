@@ -16,6 +16,8 @@ Marginalia 是本地优先的个人研究 agent。它把杂乱的私有文件整
 
 ![Marginalia 宣传图](docs/images/marginalia-promo.png)
 
+![Marginalia 桌面应用截图](docs/images/desktop-screenshot-zh-CN.jpg)
+
 ## 适合谁
 
 - 你有很多 PDF、笔记、Office 文档、图片、表格、日志和压缩包,但它们分散

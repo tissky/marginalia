@@ -17,6 +17,8 @@ file windows before it writes a cited answer.
 
 ![Marginalia promotional hero](docs/images/marginalia-promo-en.png)
 
+![Marginalia desktop app screenshot](docs/images/desktop-screenshot-en.jpg)
+
 ## Why Use It
 
 - You have research papers, meeting notes, PDFs, tables, logs, screenshots, and
