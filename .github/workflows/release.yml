@@ -138,15 +138,20 @@ jobs:
           NO_STRIP: "true"
         run: |
           set -euo pipefail
-          backend_lib_path="src-tauri/resources/backend/lib"
-          wheel_lib_path="$(
-            find src-tauri/resources/backend/lib/python3.12/site-packages \
-              -maxdepth 1 \
-              -type d \
-              -name '*.libs' \
-              -print | paste -sd ':'
+          backend_lib_dirs="$(
+            find "$(realpath src-tauri/resources/backend)" \
+              -type f \
+              \( -name '*.so' -o -name '*.so.*' \) \
+              -printf '%h\n' \
+              | sort -u \
+              | paste -sd ':'
           )"
-          export LD_LIBRARY_PATH="$backend_lib_path${wheel_lib_path:+:$wheel_lib_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          if [ -z "$backend_lib_dirs" ]; then
+            echo "No bundled backend shared library directories found." >&2
+            exit 1
+          fi
+          echo "Exposing $(printf '%s\n' "$backend_lib_dirs" | tr ':' '\n' | wc -l) bundled backend library directories to linuxdeploy."
+          export LD_LIBRARY_PATH="$backend_lib_dirs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           npm run tauri -- bundle --ci --bundles appimage --verbose
 
       - name: Package Windows portable zip

@@ -28,8 +28,7 @@
 - Ollama OpenAI-compatible profiles now use the legacy `max_tokens` chat
   parameter and avoid unsupported thinking controls during ingest.
 - Linux AppImage bundling now sets `NO_STRIP=true` for linuxdeploy and exposes
-  the bundled Python runtime and wheel private library directories during
-  dependency scanning.
+  all bundled backend shared-library directories during dependency scanning.
 
 ## 0.2.4 - 2026-06-11
 
