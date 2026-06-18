@@ -4,9 +4,11 @@
 
 ### Added
 
-- Linux desktop `.deb` / `.rpm` bundles now expose `marginalia`,
-  `marginalia-mcp`, and `marginalia-worker` CLI wrappers backed by the bundled
-  Python runtime.
+- Desktop bundles now expose `marginalia`, `marginalia-mcp`, and
+  `marginalia-worker` CLI wrappers backed by the bundled Python runtime:
+  Linux packages install commands under `/usr/bin`, Windows packages include
+  `.cmd` wrappers next to the app, and macOS bundles include wrappers under
+  `Marginalia.app/Contents/MacOS`.
 - `marginalia mcp` now follows CLI backend discovery and exposes structured
   workflow tools for asking Marginalia, upload, download, export, search, and
   metadata reads.

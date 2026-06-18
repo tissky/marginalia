@@ -49,10 +49,18 @@ Marginalia 是本地优先的个人研究 agent。它把杂乱的私有文件整
 所以 Windows SmartScreen 或 macOS Gatekeeper 第一次打开时可能会要求手动
 确认。
 
-Linux `.deb` 和 `.rpm` 还会安装 CLI wrapper,它们使用包内置的 Python
-runtime,并和桌面端共用同一个 `MARGINALIA_HOME`。因此无需另装系统 Python
-包,就可以直接运行 `marginalia`、`marginalia serve`、`marginalia mcp`、
-`marginalia-mcp` 和 `marginalia-worker`。
+桌面包也会带 CLI wrapper,它们使用包内置的 Python runtime,并和桌面端共用
+同一个 `MARGINALIA_HOME`。因此无需另装系统 Python 包,就可以使用 CLI、MCP
+server、可复用后端和 worker。
+
+- **Linux `.deb` / `.rpm`**: 在 `/usr/bin` 安装 `marginalia`、
+  `marginalia-mcp` 和 `marginalia-worker`。
+- **Windows 安装包 / portable zip**: 在 `Marginalia.exe` 旁边提供
+  `marginalia.cmd`、`marginalia-mcp.cmd` 和 `marginalia-worker.cmd`。MCP
+  客户端里可以写完整路径,或者手动把安装目录加到 `PATH`。
+- **macOS DMG**: wrapper 位于 app bundle 内:
+  `/Applications/Marginalia.app/Contents/MacOS/marginalia`,
+  `marginalia-mcp` 和 `marginalia-worker`。
 
 - **Windows**: 如果 SmartScreen 拦截,点 **更多信息** -> **仍要运行**。
 - **macOS**: 把 App 拖到 `/Applications` 后,如果提示 App 已损坏或无法验证,

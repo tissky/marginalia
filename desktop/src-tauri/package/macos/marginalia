@@ -1,0 +1,56 @@
+#!/usr/bin/env sh
+set -eu
+
+# CLI entry point for macOS desktop packages. It runs the Python package
+# embedded in the Tauri resources, so users do not need system Python.
+
+if [ -z "${MARGINALIA_HOME:-}" ]; then
+  export MARGINALIA_HOME="${HOME}/Marginalia"
+fi
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+find_backend() {
+  if [ -n "${MARGINALIA_BUNDLED_BACKEND:-}" ] && [ -d "${MARGINALIA_BUNDLED_BACKEND}" ]; then
+    printf '%s\n' "${MARGINALIA_BUNDLED_BACKEND}"
+    return 0
+  fi
+
+  for dir in \
+    "${script_dir}/../Resources/resources/backend" \
+    "${script_dir}/resources/backend"
+  do
+    if [ -d "${dir}" ]; then
+      printf '%s\n' "${dir}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+backend="$(find_backend)" || {
+  echo "marginalia: cannot find bundled backend runtime" >&2
+  exit 127
+}
+
+python=""
+for candidate in "${backend}/bin/python3" "${backend}/bin/python" "${backend}/python"; do
+  if [ -x "${candidate}" ]; then
+    python="${candidate}"
+    break
+  fi
+done
+
+if [ -z "${python}" ]; then
+  echo "marginalia: cannot find bundled Python under ${backend}" >&2
+  exit 127
+fi
+
+if [ -z "${PYTHONHOME:-}" ]; then
+  export PYTHONHOME="${backend}"
+fi
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+
+module="${MARGINALIA_PY_MODULE:-marginalia.cli.repl}"
+exec "${python}" -m "${module}" "$@"

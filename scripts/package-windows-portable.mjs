@@ -52,6 +52,11 @@ First-launch notes:
     anyway" once. Subsequent launches go straight through.
   - User data (db, library, .env) lives in %USERPROFILE%\\Marginalia by
     default. Set MARGINALIA_HOME to relocate.
+  - CLI wrappers live next to Marginalia.exe:
+      marginalia.cmd
+      marginalia-mcp.cmd
+      marginalia-worker.cmd
+    Use their full paths in MCP clients, or add this folder to PATH.
   - Portable builds do not auto-update. To upgrade: download a newer
     zip and replace this folder.
 `;
@@ -106,6 +111,13 @@ const main = () => {
     cpSync(src, dst, { recursive: true });
   };
   cp(exePath, path.join(stagingApp, friendlyExeName));
+
+  for (const wrapper of ['marginalia.cmd', 'marginalia-mcp.cmd', 'marginalia-worker.cmd']) {
+    cp(
+      path.join(projectRoot, 'desktop', 'src-tauri', 'package', 'windows', wrapper),
+      path.join(stagingApp, wrapper),
+    );
+  }
 
   // WebView2Loader.dll lives next to the exe on Tauri Windows builds.
   for (const sibling of readdirSync(releaseDir)) {

@@ -58,11 +58,20 @@ The desktop builds bundle their own Python runtime. They are currently unsigned,
 so Windows SmartScreen or macOS Gatekeeper may ask you to confirm the first
 launch.
 
-Linux `.deb` and `.rpm` packages also install CLI wrappers backed by the
-bundled Python runtime. They share the same `MARGINALIA_HOME` as the desktop
-app, so `marginalia`, `marginalia serve`, `marginalia mcp`,
-`marginalia-mcp`, and `marginalia-worker` work without installing a separate
+Desktop bundles also include CLI wrappers backed by the bundled Python
+runtime. They share the same `MARGINALIA_HOME` as the desktop app, so the CLI,
+MCP server, reusable backend, and worker work without installing a separate
 system Python package.
+
+- **Linux `.deb` / `.rpm`**: installs `marginalia`, `marginalia-mcp`, and
+  `marginalia-worker` under `/usr/bin`.
+- **Windows installer / portable zip**: includes `marginalia.cmd`,
+  `marginalia-mcp.cmd`, and `marginalia-worker.cmd` next to
+  `Marginalia.exe`. Use full paths in MCP clients or add the install folder to
+  `PATH`.
+- **macOS DMG**: includes wrappers inside the app bundle:
+  `/Applications/Marginalia.app/Contents/MacOS/marginalia`,
+  `marginalia-mcp`, and `marginalia-worker`.
 
 - **Windows**: click **More info** -> **Run anyway** if SmartScreen blocks the
   first launch.
