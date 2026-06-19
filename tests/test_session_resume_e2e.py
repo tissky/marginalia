@@ -21,6 +21,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
+from httpx import ASGITransport
 from sqlalchemy import select
 
 _TEST_PARENT = Path(os.environ.get("MARGINALIA_TEST_TMP", Path(__file__).resolve().parent))
@@ -41,6 +43,7 @@ from marginalia.db.models.task_outcomes import TaskOutcome
 from marginalia.llm.types import (
     ChatRequest, ChatResponse, TokenUsage, ToolUseBlock, ToolResultBlock,
 )
+from marginalia.main import app
 from marginalia.utils.ids import new_id
 import marginalia.agent.runtime as runtime
 
@@ -132,6 +135,29 @@ async def _drive(session_id: str, user_message: str) -> list[tuple[str, str]]:
         session_id=session_id, user_message=user_message,
     ):
         out.append((ev.event_type, ev.data))
+    return out
+
+
+async def _consume_sse(
+    client: httpx.AsyncClient,
+    path: str,
+    json_body: dict,
+) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    async with client.stream("POST", path, json=json_body) as resp:
+        assert resp.status_code == 200, await resp.aread()
+        event_type = "message"
+        data_lines: list[str] = []
+        async for line in resp.aiter_lines():
+            if line == "":
+                if data_lines or event_type != "message":
+                    out.append((event_type, "\n".join(data_lines)))
+                event_type = "message"
+                data_lines = []
+            elif line.startswith("event:"):
+                event_type = line[6:].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
     return out
 
 
@@ -269,6 +295,68 @@ async def test_fresh_session_no_resume_prefix() -> None:
     print("[2] fresh session: no resume prefix injected")
 
 
+async def test_closed_session_reopens_for_next_turn() -> None:
+    """A closed session remains the same conversation when a new turn arrives."""
+    sid = await _seed_session_with_history()
+    factory = get_session_factory()
+    async with factory() as s:
+        session = await s.get(Session, sid)
+        assert session is not None
+        session.ended_at = _now()
+        session.end_reason = "normal"
+        await s.commit()
+
+    chat = _ScriptedChat([
+        ChatResponse(
+            text="1. Continue from stored history.",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=100, output_tokens=10),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="continued answer",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=200, output_tokens=20),
+            parsed_json=None,
+        ),
+    ])
+    _install_chat(chat)
+
+    transport = ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            events = await _consume_sse(
+                c,
+                f"/v1/chat/{sid}",
+                {"query": "continue tomorrow"},
+            )
+
+    assert any(
+        event == "answer" and data == "continued answer"
+        for event, data in events
+    ), events
+    async with factory() as s:
+        session = await s.get(Session, sid)
+        assert session is not None
+        assert session.ended_at is None
+        assert session.end_reason is None
+        assert session.turn_count == 3
+        latest = (
+            await s.execute(
+                select(Conversation)
+                .where(Conversation.session_id == sid)
+                .order_by(Conversation.turn_index.desc())
+            )
+        ).scalars().first()
+        assert latest is not None
+        assert latest.turn_index == 2
+        assert latest.user_message == "continue tomorrow"
+
+    print("[3] closed session reopens and appends the next turn")
+
+
 async def test_empty_execute_response_surfaces_error() -> None:
     sid = await _seed_session_with_history()
     chat = _ScriptedChat([
@@ -335,6 +423,7 @@ async def main() -> None:
     await _create_schema()
     await test_resume_replays_history()
     await test_fresh_session_no_resume_prefix()
+    await test_closed_session_reopens_for_next_turn()
     await test_empty_execute_response_surfaces_error()
     print("\nALL SESSION-RESUME TESTS PASSED")
 

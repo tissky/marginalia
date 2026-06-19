@@ -5,8 +5,8 @@ conversations). Keeps the runtime free of bookkeeping noise.
 
 Conventions:
   - Sessions are created lazily by `create_session()`. Their `total_*`
-    counters are recomputed by `close_session()` from constituent
-    conversations.
+    counters are recomputed from constituent conversations when a turn
+    finalizes and when `close_session()` is called.
   - Each turn is a conversation. `start_conversation()` inserts the row at
     user_message; `append_llm_call()` / `append_tool_call()` mutate the JSON
     arrays + total_* counters in real time; `finalize_conversation()` writes
@@ -274,6 +274,46 @@ async def list_for_session_ordered(
     return list(rows)
 
 
+async def refresh_session_totals(
+    db: AsyncSession,
+    *,
+    session_id: str,
+) -> Session:
+    """Recompute session counters from its conversation rows.
+
+    A session can be resumed after being closed, so these counters must be a
+    cached summary of the current transcript rather than a write-once close
+    artifact.
+    """
+    s = await db.get(Session, session_id)
+    if s is None:
+        raise ValueError(f"session {session_id} missing")
+    convs = await list_for_session(db, session_id)
+    s.turn_count = len(convs)
+    s.total_input_tokens = sum(c.total_input_tokens or 0 for c in convs)
+    s.total_output_tokens = sum(c.total_output_tokens or 0 for c in convs)
+    s.total_cache_read = sum(c.total_cache_read or 0 for c in convs)
+    s.total_tool_calls = sum(c.total_tool_calls or 0 for c in convs)
+    s.total_llm_calls = sum(c.total_llm_calls or 0 for c in convs)
+    s.total_duration_ms = sum(c.total_duration_ms or 0 for c in convs)
+    s.total_cost_estimate = sum(
+        (c.total_cost_estimate or Decimal("0")) for c in convs
+    ) or Decimal("0")
+    return s
+
+
+async def reopen_session(
+    db: AsyncSession,
+    *,
+    session_id: str,
+) -> Session:
+    """Clear the close marker so another turn can continue this session."""
+    s = await refresh_session_totals(db, session_id=session_id)
+    s.ended_at = None
+    s.end_reason = None
+    return s
+
+
 async def start_conversation(
     db: AsyncSession,
     *,
@@ -383,6 +423,7 @@ async def finalize_conversation(
         raise ValueError(f"conversation {conversation_id} missing")
     conv.agent_response = agent_response
     conv.ended_at = _utcnow()
+    await refresh_session_totals(db, session_id=conv.session_id)
     return conv
 
 
@@ -393,20 +434,7 @@ async def close_session(
     end_reason: str = "normal",
 ) -> Session:
     """Roll up totals from conversations into the session and stamp ended_at."""
-    s = await db.get(Session, session_id)
-    if s is None:
-        raise ValueError(f"session {session_id} missing")
-    convs = await list_for_session(db, session_id)
-    s.turn_count = len(convs)
-    s.total_input_tokens = sum(c.total_input_tokens or 0 for c in convs)
-    s.total_output_tokens = sum(c.total_output_tokens or 0 for c in convs)
-    s.total_cache_read = sum(c.total_cache_read or 0 for c in convs)
-    s.total_tool_calls = sum(c.total_tool_calls or 0 for c in convs)
-    s.total_llm_calls = sum(c.total_llm_calls or 0 for c in convs)
-    s.total_duration_ms = sum(c.total_duration_ms or 0 for c in convs)
-    s.total_cost_estimate = sum(
-        (c.total_cost_estimate or Decimal("0")) for c in convs
-    ) or Decimal("0")
+    s = await refresh_session_totals(db, session_id=session_id)
     s.ended_at = _utcnow()
     s.end_reason = end_reason
     return s

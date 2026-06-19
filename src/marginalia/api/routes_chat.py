@@ -49,6 +49,7 @@ from marginalia.agent.runtime import run_turn
 from marginalia.agent.types import AgentTurnError, ChatMode, RunOptions
 from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import get_session
+from marginalia.repositories import sessions as session_service
 
 router = APIRouter(tags=["chat"])
 log = logging.getLogger(__name__)
@@ -85,7 +86,8 @@ async def post_chat(
     if s is None or s.deleted_at is not None:
         raise HTTPException(status_code=404, detail="session not found")
     if s.ended_at is not None:
-        raise HTTPException(status_code=409, detail="session already ended")
+        await session_service.reopen_session(db, session_id=session_id)
+        await db.commit()
 
     user_message = body.query
     lock = _lock_for(session_id)
