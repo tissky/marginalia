@@ -9,7 +9,7 @@ name: Release
 #     desktop/src-tauri/resources/backend/ via scripts/prepare-backend.mjs,
 #     so shipped bundles do not depend on a system Python.
 #   - Windows portable zip packages in addition to NSIS installers.
-#   - Native desktop bundles for Windows x64/arm64, macOS arm64, and
+#   - Native desktop bundles for Windows x64/arm64, macOS x64/arm64, and
 #     Linux x64/arm64.
 #   - Linux AppImage artifacts in addition to .deb/.rpm. Linux desktop
 #     bundles are built on Ubuntu 22.04 runners to keep the glibc baseline
@@ -54,6 +54,10 @@ jobs:
           - target: macos-arm64
             platform: macos
             runner: macos-15
+            tauri_args: "--bundles dmg"
+          - target: macos-x64
+            platform: macos
+            runner: macos-15-intel
             tauri_args: "--bundles dmg"
           - target: linux-x64
             platform: linux
@@ -353,7 +357,7 @@ jobs:
           ## Artifacts
 
           Desktop bundles built from \`$TAG\`.
-          Desktop targets: Windows x64/arm64, macOS arm64, Linux x64/arm64.
+          Desktop targets: Windows x64/arm64, macOS x64/arm64, Linux x64/arm64.
           Linux targets include .deb, .rpm, and AppImage assets built on Ubuntu 22.04 runners.
           Each bundle ships a self-contained Python runtime; no system Python required.
           Docker image: \`ghcr.io/${{ github.repository_owner }}/marginalia:$TAG\` (linux/amd64, linux/arm64)
@@ -374,6 +378,7 @@ jobs:
             "marginalia-$TAG-windows-x64-portable.zip"
             "marginalia-$TAG-windows-arm64-setup.exe"
             "marginalia-$TAG-windows-arm64-portable.zip"
+            "marginalia-$TAG-macos-x64.dmg"
             "marginalia-$TAG-macos-arm64.dmg"
             "marginalia-$TAG-linux-x64.deb"
             "marginalia-$TAG-linux-x64.rpm"
@@ -426,6 +431,7 @@ jobs:
             "marginalia-$TAG-windows-x64-portable.zip"
             "marginalia-$TAG-windows-arm64-setup.exe"
             "marginalia-$TAG-windows-arm64-portable.zip"
+            "marginalia-$TAG-macos-x64.dmg"
             "marginalia-$TAG-macos-arm64.dmg"
             "marginalia-$TAG-linux-x64.deb"
             "marginalia-$TAG-linux-x64.rpm"

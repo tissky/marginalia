@@ -384,6 +384,7 @@ mutates the GitHub Release:
 desktop matrix
   -> windows-x64
   -> windows-arm64
+  -> macos-x64
   -> macos-arm64
   -> linux-x64
   -> linux-arm64
@@ -394,7 +395,7 @@ docker
 
 publish-release
   -> download all desktop artifacts
-  -> verify the expected 9 assets
+  -> verify the expected 12 assets
   -> create/update the GitHub Release once
   -> verify release assets
 ```

@@ -51,7 +51,7 @@ Download the latest desktop package from
 [GitHub Releases](https://github.com/shenmintao/marginalia/releases):
 
 - **Windows**: x64/arm64 installer and portable zip.
-- **macOS**: Apple Silicon DMG.
+- **macOS**: Intel and Apple Silicon DMGs.
 - **Linux**: x64/arm64 `.deb` and `.rpm`.
 
 The desktop builds bundle their own Python runtime. They are currently unsigned,

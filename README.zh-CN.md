@@ -42,7 +42,7 @@ Marginalia 是本地优先的个人研究 agent。它把杂乱的私有文件整
 [Releases 页面](https://github.com/shenmintao/marginalia/releases) 提供桌面包:
 
 - **Windows**: x64/arm64 安装包和 portable zip。
-- **macOS**: Apple Silicon DMG。
+- **macOS**: Intel 和 Apple Silicon DMG。
 - **Linux**: x64/arm64 `.deb` 和 `.rpm`。
 
 每个包都内置 Python 运行时,无需系统 Python。当前二进制还没有代码签名,

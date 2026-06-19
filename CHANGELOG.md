@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Release builds now include a macOS Intel (x86_64) DMG alongside the Apple
+  Silicon DMG.
+
 ## 0.2.7 - 2026-06-19
 
 ### Added
