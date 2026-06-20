@@ -379,6 +379,27 @@ async def _check_rewrite():
             assert f"[my-doc.md](entry:{eid}?page=6)" in out, out
             assert "?page=1" not in out
 
+        # 11b. Replay can choose the cheap path: use the stored page
+        # without extracting PDF text or reading page labels.
+        async def fail_locate_pdf_quote_page(file, quote, *, pages_cache=None):
+            raise AssertionError("PDF quote locator should not run")
+
+        async def fail_resolve_pdf_page_locator(file, page):
+            raise AssertionError("PDF page-label resolver should not run")
+
+        with patch.object(
+            rt, "_locate_pdf_quote_page", new=fail_locate_pdf_quote_page,
+        ), patch.object(
+            rt, "_resolve_pdf_page_locator", new=fail_resolve_pdf_page_locator,
+        ):
+            set_file(mime_type="application/pdf", original_ext="pdf", kind="text")
+            out = await rt._rewrite_footnotes_for_display(
+                f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc", page=4 - r',
+                locate_pdf_quotes=False,
+                resolve_pdf_page_labels=False,
+            )
+            assert f"[my-doc.md](entry:{eid}?page=4)" in out, out
+
         # 12. text file + `+`-concatenated quotes: URL gets the first
         # quote, the second segment is silently dropped.
         set_file(mime_type="text/markdown", original_ext="md", kind="text")

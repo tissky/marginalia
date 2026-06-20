@@ -47,6 +47,7 @@ class DownloadHandle:
     display_name: str
     mime_type: str
     size_bytes: int
+    sha256: str | None
     stream: AsyncIterator[bytes]
 
 
@@ -225,6 +226,7 @@ async def open_for_download(
         display_name=entry.display_name,
         mime_type=file_row.mime_type or "application/octet-stream",
         size_bytes=file_row.size_bytes or 0,
+        sha256=file_row.sha256,
         stream=storage.get(file_row.storage_key),
     )
 

@@ -206,6 +206,47 @@ async def main():
             print("[6] download:", len(buf), "bytes; X-File-Id:", xfid)
             assert bytes(buf) == seeded["body_a"]
 
+            # ---- 7. Inline content supports browser byte ranges ------
+            r = await c.get(f"/v1/file-entries/{seeded['e_a']}/content")
+            assert r.status_code == 200, r.text
+            assert r.content == seeded["body_a"]
+            assert r.headers.get("accept-ranges") == "bytes"
+            assert r.headers.get("content-length") == str(len(seeded["body_a"]))
+            assert r.headers.get("etag")
+            assert "inline" in (r.headers.get("content-disposition") or "")
+            print("[7] content full response has range-ready headers")
+
+            r = await c.get(
+                f"/v1/file-entries/{seeded['e_a']}/content",
+                headers={"Range": "bytes=0-9"},
+            )
+            assert r.status_code == 206, r.text
+            assert r.content == seeded["body_a"][:10]
+            assert r.headers.get("content-range") == (
+                f"bytes 0-9/{len(seeded['body_a'])}"
+            )
+            assert r.headers.get("content-length") == "10"
+            assert r.headers.get("accept-ranges") == "bytes"
+            print("[7] content byte range 0-9 returns 206")
+
+            r = await c.get(
+                f"/v1/file-entries/{seeded['e_a']}/content",
+                headers={"Range": "bytes=-8"},
+            )
+            assert r.status_code == 206, r.text
+            assert r.content == seeded["body_a"][-8:]
+            print("[7] content suffix range returns 206")
+
+            r = await c.get(
+                f"/v1/file-entries/{seeded['e_a']}/content",
+                headers={"Range": f"bytes={len(seeded['body_a'])}-"},
+            )
+            assert r.status_code == 416, r.text
+            assert r.headers.get("content-range") == (
+                f"bytes */{len(seeded['body_a'])}"
+            )
+            print("[7] content unsatisfiable range returns 416")
+
             # ---- 7. Download 404 on soft-deleted ---------------------
             r = await c.get(f"/v1/file-entries/{seeded['e_deleted']}/download")
             assert r.status_code == 404

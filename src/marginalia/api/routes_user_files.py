@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import io
+import re
 import zipfile
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,7 @@ from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.services.recommend import find_related
 from marginalia.services.relation_vetting import schedule_direct_relation_vetting
 from marginalia.services.user_files import (
+    DownloadHandle,
     EntryNotFoundError,
     FolderNotFoundError,
     collect_folder_entries,
@@ -27,6 +29,8 @@ from marginalia.services.user_files import (
 from marginalia.storage import get_storage
 
 router = APIRouter(tags=["user_files"])
+
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 @router.get("/search")
@@ -131,6 +135,7 @@ async def file_entry_path(
 @router.get("/file-entries/{entry_id}/content")
 async def file_entry_content(
     entry_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
     """Inline-disposition variant of `/download` — used by the viewer
@@ -142,15 +147,25 @@ async def file_entry_content(
     except EntryNotFoundError:
         raise HTTPException(status_code=404, detail="entry not found")
 
-    headers = {
-        "Content-Disposition": content_disposition("inline", handle.display_name),
-        "X-File-Id": handle.file_id,
-        "X-Size-Bytes": str(handle.size_bytes),
-    }
+    headers = _file_content_headers(handle, disposition="inline")
+    byte_range = _parse_range_header(range_header, handle.size_bytes)
+    if byte_range is None:
+        headers["Content-Length"] = str(handle.size_bytes)
+        return StreamingResponse(
+            handle.stream,
+            media_type=handle.mime_type,
+            headers=headers,
+        )
+
+    start, end = byte_range
+    body = await get_storage().get_range(handle.storage_key, start, end)
+    headers["Content-Range"] = f"bytes {start}-{end}/{handle.size_bytes}"
+    headers["Content-Length"] = str(len(body))
     return StreamingResponse(
-        handle.stream,
+        _single_chunk(body),
         media_type=handle.mime_type,
         headers=headers,
+        status_code=206,
     )
 
 
@@ -174,6 +189,80 @@ async def file_entry_download(
         media_type=handle.mime_type,
         headers=headers,
     )
+
+
+def _file_content_headers(
+    handle: DownloadHandle,
+    *,
+    disposition: str,
+) -> dict[str, str]:
+    etag = f'"{handle.sha256}"' if handle.sha256 else (
+        f'W/"{handle.file_id}-{handle.size_bytes}"'
+    )
+    return {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": content_disposition(disposition, handle.display_name),
+        "ETag": etag,
+        "X-File-Id": handle.file_id,
+        "X-Size-Bytes": str(handle.size_bytes),
+    }
+
+
+def _parse_range_header(
+    value: str | None,
+    size: int,
+) -> tuple[int, int] | None:
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    if "," in value:
+        _raise_range_not_satisfiable(size)
+    match = _RANGE_RE.match(value)
+    if match is None:
+        _raise_range_not_satisfiable(size)
+    start_raw, end_raw = match.groups()
+    if not start_raw and not end_raw:
+        _raise_range_not_satisfiable(size)
+    if size <= 0:
+        _raise_range_not_satisfiable(size)
+
+    if not start_raw:
+        suffix_len = _parse_non_negative_int(end_raw, size)
+        if suffix_len <= 0:
+            _raise_range_not_satisfiable(size)
+        start = max(size - suffix_len, 0)
+        return start, size - 1
+
+    start = _parse_non_negative_int(start_raw, size)
+    end = size - 1 if not end_raw else _parse_non_negative_int(end_raw, size)
+    if start >= size or end < start:
+        _raise_range_not_satisfiable(size)
+    return start, min(end, size - 1)
+
+
+def _parse_non_negative_int(value: str, size: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        _raise_range_not_satisfiable(size)
+    if parsed < 0:
+        _raise_range_not_satisfiable(size)
+    return parsed
+
+
+def _raise_range_not_satisfiable(size: int) -> NoReturn:
+    raise HTTPException(
+        status_code=416,
+        detail="range not satisfiable",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes */{max(size, 0)}",
+        },
+    )
+
+
+async def _single_chunk(body: bytes) -> AsyncIterator[bytes]:
+    yield body
 
 
 # ---- folder download → zip stream -----------------------------------------

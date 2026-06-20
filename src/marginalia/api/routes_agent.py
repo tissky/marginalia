@@ -312,7 +312,11 @@ async def session_messages(
             "ended_at": c.ended_at.isoformat() if c.ended_at else None,
             "user_message": c.user_message,
             "agent_response": (
-                await _rewrite_footnotes_for_display(c.agent_response)
+                await _rewrite_footnotes_for_display(
+                    c.agent_response,
+                    locate_pdf_quotes=False,
+                    resolve_pdf_page_labels=False,
+                )
                 if c.agent_response else c.agent_response
             ),
             "error": replay_error,

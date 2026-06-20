@@ -1012,7 +1012,12 @@ def _footnote_detail(reason: str | None, quote: str | None) -> str | None:
     return " — ".join(parts) if parts else None
 
 
-async def _rewrite_footnotes_for_display(answer: str) -> str:
+async def _rewrite_footnotes_for_display(
+    answer: str,
+    *,
+    locate_pdf_quotes: bool = True,
+    resolve_pdf_page_labels: bool = True,
+) -> str:
     """Resolve `[^a]: entry_id=<uuid>, quote="...", page=N - reason` defs to
     `[^a]: [name](entry:<id>?q=...|?page=N) — reason` for live SSE rendering.
 
@@ -1021,6 +1026,8 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
     Legacy `lines=`/`section_id=` fields are tolerated but don't produce a
     deep-link query string. Locator selection (page vs quote vs bare) is
     driven by the entry's actual file type — see [[_pick_query_string]].
+    Replay callers can disable PDF text extraction and page-label reads when
+    latency matters more than correcting a stored `page=` value.
     """
     if not answer or "entry_id" not in answer:
         return answer
@@ -1061,11 +1068,11 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
         page = footnote.page
         if _is_pdf_file(file):
             located = None
-            if quote:
+            if locate_pdf_quotes and quote:
                 located = await _locate_pdf_quote_page(
                     file, quote, pages_cache=pdf_pages_cache,
                 )
-            if located is None and page:
+            if located is None and page and resolve_pdf_page_labels:
                 located = await _resolve_pdf_page_locator(file, page)
             if located:
                 located_pdf_pages[footnote.start] = located
