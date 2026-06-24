@@ -189,7 +189,7 @@ function settingsReferenceGroups(
         row(t.settings.conflictPolicy, r.conflictMeaning, r.conflictRecommended),
         row(t.settings.agentTokenBudget, r.agentTokenMeaning, r.agentTokenRecommended),
         row(t.settings.executeTurnBudget, r.executeTurnsMeaning, r.executeTurnsRecommended),
-        row(t.settings.readCompression, r.readCompressionMeaning, r.readCompressionRecommended),
+        row(t.settings.compression, r.compressionMeaning, r.compressionRecommended),
         row(t.settings.concurrentIngest, r.concurrentIngestMeaning, r.concurrentIngestRecommended),
         row(t.settings.ingestLlmConcurrency, r.ingestConcurrencyMeaning, r.ingestConcurrencyRecommended),
         row(t.settings.statusRefresh, r.statusRefreshMeaning, r.statusRefreshRecommended),

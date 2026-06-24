@@ -467,8 +467,8 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
         </Row>
 
         <Row
-          label={t.settings.readCompression}
-          hint={t.settings.readCompressionHint}
+          label={t.settings.compression}
+          hint={t.settings.compressionHint}
         >
           <input
             type="checkbox"
@@ -823,7 +823,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
           />
           <Kv k={t.settings.kv.executeTurns} v={String(server.agent_execute_max_turns)} />
           <Kv
-            k={t.settings.kv.readCompression}
+            k={t.settings.kv.compression}
             v={server.compression_enabled ? t.common.enabled : t.common.disabled}
           />
           <Kv k={t.settings.kv.ingestConcurrency} v={String(server.llm_ingest_concurrency)} />
