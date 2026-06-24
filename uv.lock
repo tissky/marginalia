@@ -1047,7 +1047,7 @@ wheels = [
 [[package]]
 name = "headroom-ai"
 version = "0.27.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/shenmintao/headroom.git?rev=fd26a039fe6fc8d6d06e6dab6f3c080a6526d5d2#fd26a039fe6fc8d6d06e6dab6f3c080a6526d5d2" }
 dependencies = [
     { name = "ast-grep-cli" },
     { name = "click" },
@@ -1056,12 +1056,6 @@ dependencies = [
     { name = "pydantic" },
     { name = "rich" },
     { name = "tiktoken" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/30/af/4ad9124319a0d3d8fba6c6d9bcc7cf45b8ce810e6a5c54f457ed79aa5b02/headroom_ai-0.27.0.tar.gz", hash = "sha256:1b133c7f9de9fbebd266df2d407fc4529d4d0f4276faedad838d39ed2bdc0af0", size = 1859481, upload-time = "2026-06-22T06:04:38.578Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/10/95/928bfb645df23025fb375de19c7d57ec21a0991712236d7748ce456139e3/headroom_ai-0.27.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:00b54b70533c841f4702fffaf215eff84bafed7612c07a56d675ef8a1ffab543", size = 16336560, upload-time = "2026-06-22T06:04:30.934Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/b4/e5e32e7042f7bb7bdb3aaec1dd9b31926e38612f61b5a3d5f31253f2b646/headroom_ai-0.27.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:f8fa150061db2513e8584d2e4b50af930131bcfe301080f297464b351a03f577", size = 18400667, upload-time = "2026-06-22T06:04:33.721Z" },
-    { url = "https://files.pythonhosted.org/packages/8f/70/2e287f4f4bc8306c8c51bb40e753cfdfa05c568d026be633c78d9f4f2995/headroom_ai-0.27.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:640e67a41743265376582a92691a192a8c2448ef0b2167a0e14a2a458adbe2dd", size = 17521574, upload-time = "2026-06-22T06:04:36.016Z" },
 ]
 
 [[package]]
@@ -1553,7 +1547,7 @@ requires-dist = [
     { name = "fpdf2", marker = "extra == 'dev'", specifier = ">=2.8" },
     { name = "glowpy", git = "https://github.com/shenmintao/glowpy.git?rev=main" },
     { name = "greenlet", specifier = ">=3.1" },
-    { name = "headroom-ai", specifier = ">=0.4" },
+    { name = "headroom-ai", git = "https://github.com/shenmintao/headroom.git?rev=fd26a039fe6fc8d6d06e6dab6f3c080a6526d5d2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "moto", extras = ["s3"], marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "openai", specifier = ">=1.55" },
