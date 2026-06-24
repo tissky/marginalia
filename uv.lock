@@ -1509,6 +1509,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "glowpy" },
     { name = "greenlet" },
+    { name = "headroom-ai" },
     { name = "httpx" },
     { name = "openai" },
     { name = "openpyxl" },
@@ -1534,9 +1535,6 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
-headroom = [
-    { name = "headroom-ai" },
-]
 semantic = [
     { name = "sqlite-vec" },
 ]
@@ -1555,7 +1553,7 @@ requires-dist = [
     { name = "fpdf2", marker = "extra == 'dev'", specifier = ">=2.8" },
     { name = "glowpy", git = "https://github.com/shenmintao/glowpy.git?rev=main" },
     { name = "greenlet", specifier = ">=3.1" },
-    { name = "headroom-ai", marker = "extra == 'headroom'", specifier = ">=0.4" },
+    { name = "headroom-ai", specifier = ">=0.4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "moto", extras = ["s3"], marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "openai", specifier = ">=1.55" },
@@ -1577,7 +1575,7 @@ requires-dist = [
     { name = "sse-starlette", specifier = ">=2.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
-provides-extras = ["semantic", "headroom", "dev"]
+provides-extras = ["semantic", "dev"]
 
 [[package]]
 name = "markdown-it-py"

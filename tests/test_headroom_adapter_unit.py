@@ -335,7 +335,7 @@ def test_ingest_aggregate_view_uses_text_compressor(monkeypatch) -> None:
         "_compress_plain_text",
         lambda body, context, target_ratio: mod.HeadroomText(
             text="compact aggregate",
-            strategy="headroom.text_crusher",
+            strategy="headroom.kompress",
             original_chars=len(body),
             compressed_chars=17,
             extra={"lossy": True},

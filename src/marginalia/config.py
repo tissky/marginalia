@@ -124,16 +124,9 @@ class Settings(BaseSettings):
     # This is intentionally backend-owned so desktop, web, and CLI clients
     # get the same stuck-turn recovery behavior.
     agent_turn_timeout_seconds: float = 1800.0
-    # Unified compression switch. COMPRESSION_ENABLED is canonical; legacy
-    # READ_/HEADROOM_ env names are accepted only for upgrades.
-    compression_enabled: bool = Field(
-        True,
-        validation_alias=AliasChoices(
-            "COMPRESSION_ENABLED",
-            "READ_COMPRESSION_ENABLED",
-            "HEADROOM_COMPRESSION_ENABLED",
-        ),
-    )
+    # Unified compression switch. Only COMPRESSION_ENABLED controls all
+    # Headroom-backed ingest, query, and read_files compression paths.
+    compression_enabled: bool = Field(True, validation_alias="COMPRESSION_ENABLED")
     compression_min_chars: int = Field(
         12_000,
         validation_alias=AliasChoices(

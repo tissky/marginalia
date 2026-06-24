@@ -66,9 +66,9 @@ async def _seed():
     ).encode("utf-8")
     long_body = "\n".join(
         (
-            f"Long line {idx}: background material for read_files result "
-            "compression. The content is intentionally repetitive and low "
-            "signal so the first pass can omit middle ranges safely."
+            f"INFO read_files timestamp=2026-01-01T00{idx % 60:02d}00Z batch={idx} "
+            "stage=preview status=ok detail=repetitive low-signal background "
+            "material for result compression."
         )
         for idx in range(1, 360)
     ).encode("utf-8")
@@ -519,7 +519,7 @@ async def main():
     compression_meta = compressed_read["extras"]["read_compression"]
     assert compression_meta["compressed"] is True, compression_meta
     assert compression_meta["omitted"], compression_meta
-    assert "omitted chars" in compressed_read["text"], compressed_read["text"][:500]
+    assert str(compression_meta["strategy"]).startswith("headroom."), compression_meta
     assert len(compressed_read["text"]) < compression_meta["original_chars"]
 
     rf_uncompressed = await _call("read_files", {

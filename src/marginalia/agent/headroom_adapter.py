@@ -1,8 +1,9 @@
-"""Optional Headroom compression bridge.
+"""Headroom compression bridge.
 
-Headroom is not a required dependency for Marginalia. This module keeps the
-boundary fail-open: if Headroom or its Rust extension is unavailable, callers
-receive ``None`` and continue with the existing prompt payload.
+Headroom is a standard dependency for Marginalia. This module still keeps the
+runtime boundary fail-open: if a specific Headroom transform or model runtime
+cannot compress a payload, callers receive ``None`` and keep the original
+prompt payload.
 """
 from __future__ import annotations
 
@@ -469,28 +470,34 @@ def _compress_records(
 
 
 def _compress_plain_text(text: str, *, context: str, target_ratio: float) -> HeadroomText | None:
-    from headroom.transforms.text_crusher import (  # type: ignore[import-not-found]
-        TextCrusher,
-        TextCrusherConfig,
+    from headroom.transforms.kompress_compressor import (  # type: ignore[import-not-found]
+        KompressCompressor,
+        KompressConfig,
+        is_kompress_available,
     )
 
+    if not is_kompress_available():
+        return None
     ratio = _clamp_ratio(target_ratio)
-    result = TextCrusher(TextCrusherConfig(target_ratio=ratio)).compress(
+    result = KompressCompressor(KompressConfig(enable_ccr=False)).compress(
         text,
         context=context,
         target_ratio=ratio,
+        allow_download=False,
     )
     compressed = str(result.compressed)
     if compressed == text:
         return None
     return HeadroomText(
         text=compressed,
-        strategy="headroom.text_crusher",
+        strategy="headroom.kompress",
         original_chars=len(text),
         compressed_chars=len(compressed),
         extra={
-            "kept_segments": getattr(result, "kept_segments", None),
-            "total_segments": getattr(result, "total_segments", None),
+            "original_tokens": getattr(result, "original_tokens", None),
+            "compressed_tokens": getattr(result, "compressed_tokens", None),
+            "compression_ratio": getattr(result, "compression_ratio", None),
+            "model_used": getattr(result, "model_used", None),
             "lossy": True,
         },
     )

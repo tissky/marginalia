@@ -82,11 +82,9 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
 })
 
 _LEGACY_FIELD_ALIASES: dict[str, str] = {
-    "read_compression_enabled": "compression_enabled",
     "read_compression_min_chars": "compression_min_chars",
     "read_compression_target_chars": "compression_target_chars",
     "read_compression_context_chars": "compression_context_chars",
-    "headroom_compression_enabled": "compression_enabled",
     "headroom_compression_min_chars": "compression_min_chars",
     "headroom_compression_max_ratio": "compression_max_ratio",
 }
