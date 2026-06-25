@@ -145,6 +145,8 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
             url={contentUrl}
             name={name}
             downloadUrl={downloadUrl}
+            page={Number.isFinite(pageLoc as number) ? (pageLoc as number) : null}
+            onScrolled={onLocatorConsumed}
           />
         )}
         {kind === "email" && (

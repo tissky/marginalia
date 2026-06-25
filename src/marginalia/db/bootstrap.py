@@ -881,5 +881,17 @@ def bootstrap_schema_sync(bind) -> None:
 async def bootstrap_schema() -> None:
     """Run schema creation + inbox seed against the configured async engine."""
     engine = get_engine()
+    if engine.sync_engine.dialect.name == "sqlite":
+        # SQLite PRAGMA foreign_keys cannot be toggled once a write
+        # transaction has started. Some post-baseline shims rebuild tables
+        # referenced by live FKs, so run each shim in its own transaction.
+        async with engine.begin() as conn:
+            await conn.run_sync(bootstrap_baseline_sync)
+        for _rev, helper in POST_BASELINE_SHIMS:
+            async with engine.begin() as conn:
+                await conn.run_sync(helper)
+        async with engine.begin() as conn:
+            await conn.run_sync(_stamp_alembic_version, ALEMBIC_HEAD_REVISION)
+        return
     async with engine.begin() as conn:
         await conn.run_sync(bootstrap_schema_sync)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 from uuid import uuid4
 
 import pytest
@@ -327,3 +329,121 @@ def test_files_kind_check_migration_allows_supplemental_kinds() -> None:
             """), {"sha": "2" * 64})
     finally:
         engine.dispose()
+
+
+def test_bootstrap_migrates_files_kind_with_live_file_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    db_path = home / "marginalia.db"
+    seed_engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        with seed_engine.begin() as conn:
+            conn.execute(sa.text("PRAGMA foreign_keys=ON"))
+            conn.execute(sa.text("""
+                CREATE TABLE files (
+                    storage_key VARCHAR(255) NOT NULL,
+                    sha256 VARCHAR(64) NOT NULL,
+                    size_bytes BIGINT NOT NULL,
+                    mime_type VARCHAR(255),
+                    original_ext VARCHAR(32),
+                    kind VARCHAR(16),
+                    summary TEXT,
+                    description JSON,
+                    extra TEXT,
+                    ingest_status VARCHAR(16) NOT NULL,
+                    ingested_at DATETIME,
+                    deleted_at DATETIME,
+                    id VARCHAR(36) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CONSTRAINT pk_files PRIMARY KEY (id),
+                    CONSTRAINT ck_files_ingest_status
+                        CHECK (ingest_status IN (
+                            'pending', 'processing', 'done', 'failed'
+                        )),
+                    CONSTRAINT ck_files_kind
+                        CHECK (kind IS NULL OR kind IN (
+                            'text', 'table', 'log', 'image', 'audio', 'video',
+                            'code', 'container'
+                        )),
+                    CONSTRAINT uq_files_storage_key UNIQUE (storage_key)
+                )
+            """))
+            conn.execute(sa.text("""
+                CREATE TABLE file_entries (
+                    folder_id VARCHAR(36),
+                    file_id VARCHAR(36) NOT NULL,
+                    display_name VARCHAR(255) NOT NULL,
+                    lifecycle VARCHAR(16) NOT NULL,
+                    catalog_id VARCHAR(36),
+                    extra TEXT,
+                    deleted_at DATETIME,
+                    purge_after DATETIME,
+                    id VARCHAR(36) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CONSTRAINT pk_file_entries PRIMARY KEY (id),
+                    CONSTRAINT lifecycle CHECK (
+                        lifecycle IN (
+                            'active', 'demoted', 'archived',
+                            'manual_active', 'manual_archived'
+                        )
+                    ),
+                    FOREIGN KEY(file_id) REFERENCES files (id) ON DELETE RESTRICT
+                )
+            """))
+            conn.execute(sa.text("""
+                INSERT INTO files (
+                    storage_key, sha256, size_bytes, kind, ingest_status,
+                    id, created_at, updated_at
+                )
+                VALUES (
+                    'objects/file-1', :sha, 10, 'text', 'done',
+                    'file-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+            """), {"sha": "0" * 64})
+            conn.execute(sa.text("""
+                INSERT INTO file_entries (
+                    file_id, display_name, lifecycle, id, created_at, updated_at
+                )
+                VALUES (
+                    'file-1', 'sample.txt', 'active', 'entry-1',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+            """))
+    finally:
+        seed_engine.dispose()
+
+    monkeypatch.setenv("MARGINALIA_HOME", str(home))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("STORAGE_BACKEND", "mirror")
+
+    from marginalia.config import get_settings
+    from marginalia.db.bootstrap import bootstrap_schema
+    from marginalia.db.engine import dispose_engine
+    from marginalia.storage import reset_storage_cache
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    reset_storage_cache()
+    asyncio.run(dispose_engine())
+    try:
+        asyncio.run(bootstrap_schema())
+    finally:
+        asyncio.run(dispose_engine())
+
+    with sqlite3.connect(db_path) as con:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute("""
+            INSERT INTO files (
+                storage_key, sha256, size_bytes, kind, ingest_status,
+                id, created_at, updated_at
+            )
+            VALUES (
+                'objects/file-2', ?, 10, 'email', 'done',
+                'file-2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+        """, ("1" * 64,))
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []

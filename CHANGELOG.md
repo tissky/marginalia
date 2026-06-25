@@ -2,10 +2,36 @@
 
 ## Unreleased
 
+## 0.2.9 - 2026-06-25
+
+### Fixed
+
+- EPUB previews now open API-served original files reliably and expose
+  Office-style current-page / total-page navigation.
+- SQLite startup bootstrap now runs post-baseline shims in separate
+  transactions, allowing existing user libraries with live `file_entries`
+  foreign keys to migrate the expanded file-kind check constraint.
+
+## 0.2.8 - 2026-06-24
+
 ### Added
 
 - Release builds now include a macOS Intel (x86_64) DMG alongside the Apple
   Silicon DMG.
+
+### Changed
+
+- Headroom-based read compression is now the standard path for long text,
+  logs, archive members, PDFs, and read-files tool output.
+- The Headroom compression core is vendored so packaged builds no longer
+  depend on the external Headroom package or its optional ONNX stack.
+- Desktop settings and help copy now use the current compression setting names.
+
+### Fixed
+
+- Session replay handles stopped/error turns more reliably.
+- PDF inline content responses now support byte ranges for better large-file
+  viewer performance.
 
 ## 0.2.7 - 2026-06-19
 
