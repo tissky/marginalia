@@ -84,6 +84,8 @@ _EXT_TO_MIME: dict[str, str] = {
     ".log": "application/x-log",
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".pptm": "application/vnd.ms-powerpoint.presentation.macroenabled.12",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".gif": "image/gif", ".webp": "image/webp",
@@ -451,7 +453,7 @@ def _pick_members(members) -> list:
         return []
     PRIORITY = {
         ".md": 0, ".rst": 0, ".txt": 1,
-        ".pdf": 1, ".docx": 1, ".xlsx": 2,
+        ".pdf": 1, ".docx": 1, ".pptx": 1, ".pptm": 1, ".xlsx": 2,
         ".log": 2,
         ".py": 3, ".js": 3, ".ts": 3, ".go": 3, ".rs": 3, ".java": 3,
         ".json": 4, ".yaml": 4, ".yml": 4, ".toml": 4,

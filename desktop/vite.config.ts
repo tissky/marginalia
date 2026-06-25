@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import wasm from "vite-plugin-wasm";
 import path from "node:path";
 
 const API_PROXY_TARGET =
@@ -11,7 +12,7 @@ const API_PROXY_TARGET =
 // for the common case; CORS is still configured server-side for the
 // less common cross-origin Tauri/production deploys.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [wasm(), react()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
   },

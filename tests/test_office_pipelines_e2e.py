@@ -1,14 +1,15 @@
-"""End-to-end tests for docx + spreadsheet pipelines.
+"""End-to-end tests for docx + pptx + spreadsheet pipelines.
 
 Run:
     .venv/Scripts/python tests/test_office_pipelines_e2e.py
 
 Verifies for both pipelines:
   1. Registry routes the right mime/ext to the right pipeline.
-  2. Round-trip: real .docx / .xlsx file is built in-memory, ingested,
+  2. Round-trip: real .docx / .pptx / .xlsx file is built in-memory, ingested,
      fake LLM returns a valid index, file row reaches ingest_status='done'.
   3. read_segment supports its specialty fields:
        docx        → paragraph_start / paragraph_end, pattern, chunk
+       pptx        → slide_start / slide_end, pattern, chunk
        spreadsheet → heading="Sheet: <name>", pattern, chunk
   4. Invalid args (out-of-range paragraph, unknown sheet) return ok=false
      with a clear error message.
@@ -44,6 +45,7 @@ from marginalia.db.engine import get_engine, get_session_factory
 from marginalia.db.models import Base, File, FileEntry
 from marginalia.llm.types import ChatRequest, ChatResponse, TokenUsage
 from marginalia.pipelines.docx import DocxPipeline
+from marginalia.pipelines.pptx import PptxPipeline
 from marginalia.pipelines.registry import resolve_pipeline
 from marginalia.pipelines.spreadsheet import SpreadsheetPipeline
 from marginalia.storage import get_storage
@@ -96,6 +98,7 @@ form: {kind}
 def _install_fakes() -> None:
     llm.reset_clients_cache()
     docx_fake = _make_fake("docx")
+    pptx_fake = _make_fake("pptx")
     spreadsheet_fake = _make_fake("spreadsheet")
     import marginalia.pipelines._text_indexer as imod
 
@@ -109,6 +112,8 @@ def _install_fakes() -> None:
             mod = frame.frame.f_globals.get("__name__", "")
             if mod.endswith(".docx"):
                 return docx_fake
+            if mod.endswith(".pptx"):
+                return pptx_fake
             if mod.endswith(".spreadsheet"):
                 return spreadsheet_fake
         return docx_fake  # safe default for tests (any will satisfy schema)
@@ -159,6 +164,33 @@ def _build_xlsx() -> bytes:
 
     buf = io.BytesIO()
     wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_pptx() -> bytes:
+    """Build a real .pptx with text, a table, and speaker notes."""
+    from pptx import Presentation  # type: ignore
+    from pptx.util import Inches  # type: ignore
+
+    prs = Presentation()
+
+    slide1 = prs.slides.add_slide(prs.slide_layouts[1])
+    slide1.shapes.title.text = "Consensus Overview"
+    slide1.placeholders[1].text = "Raft leader election\nPaxos acceptors"
+    slide1.notes_slide.notes_text_frame.text = "Presenter note mentions quorum."
+
+    slide2 = prs.slides.add_slide(prs.slide_layouts[5])
+    slide2.shapes.title.text = "Latency Table"
+    table = slide2.shapes.add_table(
+        2, 2, Inches(1), Inches(1.4), Inches(5), Inches(1),
+    ).table
+    table.cell(0, 0).text = "Round"
+    table.cell(0, 1).text = "Latency"
+    table.cell(1, 0).text = "steady"
+    table.cell(1, 1).text = "8 ms"
+
+    buf = io.BytesIO()
+    prs.save(buf)
     return buf.getvalue()
 
 
@@ -214,12 +246,18 @@ async def go() -> None:
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ".xlsx",
     )
+    pptx_pl = resolve_pipeline(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".pptx",
+    )
     assert isinstance(docx_pl, DocxPipeline), docx_pl
+    assert isinstance(pptx_pl, PptxPipeline), pptx_pl
     assert isinstance(xlsx_pl, SpreadsheetPipeline), xlsx_pl
-    print("[1] registry routes docx→DocxPipeline and xlsx→SpreadsheetPipeline")
+    print("[1] registry routes docx→DocxPipeline, pptx→PptxPipeline, xlsx→SpreadsheetPipeline")
 
-    # 2. round-trip ingest for both
+    # 2. round-trip ingest for all office formats
     docx_bytes = _build_docx()
+    pptx_bytes = _build_pptx()
     xlsx_bytes = _build_xlsx()
 
     docx_file_id, _ = await _seed_file(
@@ -232,7 +270,13 @@ async def go() -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         name="test.xlsx",
     )
+    pptx_file_id, _ = await _seed_file(
+        body=pptx_bytes,
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        name="test.pptx",
+    )
     await _ingest(docx_file_id)
+    await _ingest(pptx_file_id)
     await _ingest(xlsx_file_id)
 
     factory = get_session_factory()
@@ -243,18 +287,26 @@ async def go() -> None:
         xlsx_row = (await db.execute(
             select(File).where(File.id == xlsx_file_id)
         )).scalar_one()
+        pptx_row = (await db.execute(
+            select(File).where(File.id == pptx_file_id)
+        )).scalar_one()
 
     assert docx_row.ingest_status == "done", docx_row.ingest_status
+    assert pptx_row.ingest_status == "done", pptx_row.ingest_status
     assert xlsx_row.ingest_status == "done", xlsx_row.ingest_status
     assert docx_row.kind == "text"
+    assert pptx_row.kind == "text"
     assert xlsx_row.kind == "table"
     docx_coverage = (docx_row.description or {}).get("coverage") or {}
+    pptx_coverage = (pptx_row.description or {}).get("coverage") or {}
     xlsx_coverage = (xlsx_row.description or {}).get("coverage") or {}
     assert docx_coverage.get("source_mode") == "docx_extracted_text", docx_coverage
     assert docx_coverage.get("indexed_partial") is False, docx_coverage
+    assert pptx_coverage.get("source_mode") == "pptx_extracted_text", pptx_coverage
+    assert pptx_coverage.get("total_slides") == 2, pptx_coverage
     assert xlsx_coverage.get("source_mode") == "spreadsheet_row_sample", xlsx_coverage
     assert xlsx_coverage.get("indexed_partial") is False, xlsx_coverage
-    print(f"[2] ingest done: docx kind={docx_row.kind} xlsx kind={xlsx_row.kind}")
+    print(f"[2] ingest done: docx kind={docx_row.kind} pptx kind={pptx_row.kind} xlsx kind={xlsx_row.kind}")
 
     # 3a. docx read_segment
     storage = get_storage()
@@ -299,7 +351,42 @@ async def go() -> None:
     assert seg.error is not None and "integer" in seg.error
     print("[3d] non-integer paragraph_start → clear error")
 
-    # 4a. spreadsheet read_segment
+    # 4a. pptx read_segment
+    seg = await pptx_pl.read_segment(
+        file_row=pptx_row,
+        args={"slide_start": 1, "slide_end": 1},
+        storage=storage,
+    )
+    assert seg.error is None, seg.error
+    assert "Consensus Overview" in seg.text
+    assert "Raft leader election" in seg.text
+    assert "Presenter note mentions quorum." in seg.text
+    assert "Latency Table" not in seg.text
+    assert seg.extras["slide_start"] == 1
+    assert seg.extras["slide_end"] == 1
+    print(f"[4a] pptx slide 1 read: {seg.extras['char_count']} chars")
+
+    seg = await pptx_pl.read_segment(
+        file_row=pptx_row,
+        args={"pattern": "steady|quorum", "context_lines": 1, "max_matches": 5},
+        storage=storage,
+    )
+    assert seg.error is None, seg.error
+    assert seg.extras["match_count"] >= 2
+    assert "Round | Latency" in seg.text
+    print(f"[4b] pptx pattern matches: {seg.extras['match_count']}")
+
+    seg = await pptx_pl.read_segment(
+        file_row=pptx_row,
+        args={"page_start": 2},
+        storage=storage,
+    )
+    assert seg.error is None, seg.error
+    assert "Latency Table" in seg.text
+    assert "Round | Latency" in seg.text
+    print("[4c] pptx page_start alias reads slide 2")
+
+    # 5a. spreadsheet read_segment
     seg = await xlsx_pl.read_segment(
         file_row=xlsx_row,
         args={"heading": "consensus"},
@@ -309,7 +396,7 @@ async def go() -> None:
     assert "consensus" in seg.text
     assert "alice" in seg.text
     assert "latency" not in seg.text  # other sheet not included
-    print(f"[4a] spreadsheet heading 'consensus' → {seg.extras['char_count']} chars")
+    print(f"[5a] spreadsheet heading 'consensus' → {seg.extras['char_count']} chars")
 
     seg = await xlsx_pl.read_segment(
         file_row=xlsx_row,
@@ -318,7 +405,7 @@ async def go() -> None:
     )
     assert seg.error is None, seg.error
     assert seg.extras["match_count"] >= 2
-    print(f"[4b] spreadsheet pattern matches: {seg.extras['match_count']}")
+    print(f"[5b] spreadsheet pattern matches: {seg.extras['match_count']}")
 
     seg = await xlsx_pl.read_segment(
         file_row=xlsx_row,
@@ -328,7 +415,7 @@ async def go() -> None:
     assert seg.error is not None
     assert "available_sheets" in seg.extras
     assert "consensus" in seg.extras["available_sheets"]
-    print(f"[4c] unknown sheet → error + available_sheets={seg.extras['available_sheets']}")
+    print(f"[5c] unknown sheet → error + available_sheets={seg.extras['available_sheets']}")
 
     # default chunk read includes both sheets
     seg = await xlsx_pl.read_segment(
@@ -338,7 +425,7 @@ async def go() -> None:
     )
     assert seg.error is None
     assert "consensus" in seg.text and "latency" in seg.text
-    print("[4d] default chunk read returns both sheets")
+    print("[5d] default chunk read returns both sheets")
 
     print("\nALL OFFICE PIPELINES E2E CHECKS PASSED")
 

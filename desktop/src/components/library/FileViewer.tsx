@@ -1,10 +1,10 @@
-/** Renders the body of a file entry. Tier 1 (browser-native) + DOCX:
+/** Renders the body of a file entry. Tier 1 (browser-native) + OOXML:
  *
  *    PDF   → <iframe> the download URL; browser's PDF reader takes over
  *    image → <img>
  *    md    → react-markdown
  *    text  → react-syntax-highlighter (or <pre> for very large files)
- *    docx  → mammoth.js converts to HTML in the worker thread
+ *    docx/xlsx/xlsm/pptx/pptm → @silurus/ooxml renders Office Open XML to canvas
  *    other → "Preview not available — open in default app" + download link
  *
  *  We rely on the entry's display_name extension and metadata.mime_type
@@ -21,8 +21,17 @@
  *            manual deep-links still resolve)
  *    page  → PDF iframe receives `#page=N`
  */
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { FileText, Download, AlertCircle, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from "react";
+import {
+  FileText,
+  Download,
+  AlertCircle,
+  Loader2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ChevronDown,
+} from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus, prism } from "react-syntax-highlighter/dist/esm/styles/prism";
 
@@ -44,7 +53,8 @@ interface Props {
   onLocatorConsumed?: () => void;
 }
 
-type Kind = "pdf" | "image" | "md" | "text" | "code" | "docx" | "binary";
+type Kind = "pdf" | "image" | "md" | "text" | "code" | "docx" | "xlsx" | "pptx" | "binary";
+type SingleCanvasOoxmlKind = "xlsx" | "pptx";
 
 const TEXT_EXT = new Set([
   "txt", "log", "csv", "tsv", "ini", "conf", "env", "sql", "rst",
@@ -59,125 +69,14 @@ const CODE_EXT_TO_LANG: Record<string, string> = {
   md: "markdown",
 };
 
-const DOCX_ALLOWED_TAGS = new Set([
-  "A", "B", "BLOCKQUOTE", "BR", "CODE", "DD", "DIV", "DL", "DT", "EM",
-  "H1", "H2", "H3", "H4", "H5", "H6", "HR", "I", "IMG", "LI", "OL",
-  "P", "PRE", "S", "SPAN", "STRONG", "SUB", "SUP", "TABLE", "TBODY",
-  "TD", "TH", "THEAD", "TR", "U", "UL",
-]);
-
-const DOCX_DROP_TAGS = new Set([
-  "AUDIO", "BUTTON", "CANVAS", "EMBED", "FORM", "IFRAME", "INPUT",
-  "LINK", "MATH", "META", "OBJECT", "SCRIPT", "SELECT", "STYLE", "SVG",
-  "TEMPLATE", "TEXTAREA", "VIDEO",
-]);
-
-const DOCX_ALLOWED_ATTRS: Record<string, Set<string>> = {
-  A: new Set(["href", "title"]),
-  IMG: new Set(["src", "alt", "title"]),
-  TD: new Set(["colspan", "rowspan"]),
-  TH: new Set(["colspan", "rowspan"]),
-};
-
-function sanitizeDocxHtml(html: string): string {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-
-  const isSafeUrl = (value: string, opts?: { image?: boolean }): boolean => {
-    const image = Boolean(opts?.image);
-    const trimmed = value.trim();
-    if (!trimmed) return false;
-    if (
-      trimmed.startsWith("#") ||
-      (trimmed.startsWith("/") && !trimmed.startsWith("//")) ||
-      trimmed.startsWith("./") ||
-      trimmed.startsWith("../")
-    ) {
-      return true;
-    }
-    try {
-      const url = new URL(trimmed, window.location.origin);
-      if (url.protocol === "http:" || url.protocol === "https:") {
-        return true;
-      }
-      if (!image && (url.protocol === "mailto:" || url.protocol === "tel:")) {
-        return true;
-      }
-      if (image && url.protocol === "data:") {
-        return /^data:image\/(png|jpeg|jpg|gif|webp);base64,/i.test(trimmed);
-      }
-    } catch {
-      return false;
-    }
-    return false;
-  };
-
-  const unwrap = (el: Element): void => {
-    const parent = el.parentNode;
-    if (!parent) return;
-    while (el.firstChild) {
-      parent.insertBefore(el.firstChild, el);
-    }
-    parent.removeChild(el);
-  };
-
-  const scrubChildren = (root: ParentNode): void => {
-    for (const child of Array.from(root.childNodes)) {
-      scrub(child);
-    }
-  };
-
-  const scrub = (node: Node): void => {
-    if (node.nodeType === Node.COMMENT_NODE) {
-      node.parentNode?.removeChild(node);
-      return;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) {
-      return;
-    }
-    const el = node as HTMLElement;
-    scrubChildren(el);
-    if (!DOCX_ALLOWED_TAGS.has(el.tagName)) {
-      if (DOCX_DROP_TAGS.has(el.tagName)) {
-        el.parentNode?.removeChild(el);
-      } else {
-        unwrap(el);
-      }
-      return;
-    }
-    const allowed = DOCX_ALLOWED_ATTRS[el.tagName] || new Set<string>();
-    for (const attr of Array.from(el.attributes)) {
-      const name = attr.name.toLowerCase();
-      if (name.startsWith("on") || name === "style" || name === "srcdoc") {
-        el.removeAttribute(attr.name);
-        continue;
-      }
-      if (!allowed.has(name)) {
-        el.removeAttribute(attr.name);
-        continue;
-      }
-      if (el.tagName === "A" && name === "href" && !isSafeUrl(attr.value)) {
-        el.removeAttribute(attr.name);
-      }
-      if (el.tagName === "IMG" && name === "src" && !isSafeUrl(attr.value, { image: true })) {
-        el.removeAttribute(attr.name);
-      }
-    }
-    if (el.tagName === "A") {
-      el.setAttribute("rel", "noreferrer");
-    }
-  };
-
-  scrubChildren(template.content);
-  return template.innerHTML;
-}
-
 function classifyByName(name: string): Kind {
   const ext = (name.split(".").pop() || "").toLowerCase();
   if (ext === "pdf") return "pdf";
   if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"].includes(ext)) return "image";
   if (ext === "md" || ext === "markdown") return "md";
   if (ext === "docx") return "docx";
+  if (ext === "xlsx" || ext === "xlsm") return "xlsx";
+  if (ext === "pptx" || ext === "pptm") return "pptx";
   if (CODE_EXT_TO_LANG[ext]) return "code";
   if (TEXT_EXT.has(ext)) return "text";
   return "binary";
@@ -251,8 +150,24 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
           />
         )}
         {kind === "docx" && (
-          <DocxView
+          <DocxScrollView
             url={contentUrl}
+            quote={quoteLoc}
+            onScrolled={onLocatorConsumed}
+          />
+        )}
+        {kind === "xlsx" && (
+          <OoxmlView
+            url={contentUrl}
+            format="xlsx"
+            quote={quoteLoc}
+            onScrolled={onLocatorConsumed}
+          />
+        )}
+        {kind === "pptx" && (
+          <OoxmlView
+            url={contentUrl}
+            format="pptx"
             quote={quoteLoc}
             onScrolled={onLocatorConsumed}
           />
@@ -289,9 +204,42 @@ function PdfView({ url, page }: { url: string; page: number | null }) {
 }
 
 function ImageView({ url }: { url: string }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const zoom = useViewportWheelZoom(scrollRef, pageRefs, {
+    resetKey: url,
+    applyZoom: (value) => applyVisualPageScale(pageRefs.current, value),
+  });
+
+  const refreshImageZoom = () => {
+    const page = pageRefs.current[0];
+    if (!page) return;
+    refreshVisualPageBase(page);
+    applyVisualPageScale(pageRefs.current, zoom.zoomRef.current);
+  };
+
   return (
-    <div className="flex h-full items-center justify-center overflow-auto bg-bg-subtle p-4">
-      <img src={url} className="max-h-full max-w-full object-contain" alt="" />
+    <div className="flex h-full min-h-0 flex-col bg-bg-subtle">
+      <div className="flex h-9 shrink-0 items-center justify-end border-b border-border bg-bg px-3 text-xs text-fg-muted">
+        <span className="min-w-16 text-center tabular-nums">{Math.round(zoom.zoom * 100)}%</span>
+      </div>
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
+        <div className="flex min-h-full w-full items-center justify-center p-4">
+          <div
+            ref={(el) => { pageRefs.current[0] = el; }}
+            className="inline-flex justify-center"
+          >
+            <div className="inline-block">
+              <img
+                src={url}
+                className="block max-h-full max-w-full object-contain"
+                alt=""
+                onLoad={refreshImageZoom}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -397,6 +345,109 @@ function decodeLikelyUtf16(bytes: Uint8Array): string | null {
 
 function stripLeadingBom(text: string): string {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.round(clamp(value, min, max));
+}
+
+interface ViewportZoomAnchor {
+  pageIndex: number;
+  relX: number;
+  relY: number;
+  clientX: number;
+  clientY: number;
+}
+
+const VIEWER_MIN_ZOOM = 0.45;
+const VIEWER_MAX_ZOOM = 2.5;
+
+function useViewportWheelZoom(
+  rootRef: RefObject<HTMLDivElement>,
+  pagesRef: MutableRefObject<(HTMLDivElement | null)[]>,
+  opts: {
+    resetKey: string;
+    min?: number;
+    max?: number;
+    applyZoom?: (zoom: number) => void;
+    onZoomSettled?: (zoom: number) => void;
+  },
+) {
+  const min = opts.min ?? VIEWER_MIN_ZOOM;
+  const max = opts.max ?? VIEWER_MAX_ZOOM;
+  const applyZoomRef = useRef(opts.applyZoom);
+  const onZoomSettledRef = useRef(opts.onZoomSettled);
+  const zoomRef = useRef(1);
+  const zoomLabelFrameRef = useRef<number | null>(null);
+  const zoomLabelValueRef = useRef(1);
+  const zoomSettledRef = useRef<number | null>(null);
+  const [zoom, setZoom] = useState(1);
+
+  useEffect(() => {
+    applyZoomRef.current = opts.applyZoom;
+    onZoomSettledRef.current = opts.onZoomSettled;
+  });
+
+  useEffect(() => {
+    zoomRef.current = 1;
+    zoomLabelValueRef.current = 1;
+    setZoom(1);
+    applyZoomRef.current?.(1);
+    return () => {
+      if (zoomLabelFrameRef.current != null) {
+        window.cancelAnimationFrame(zoomLabelFrameRef.current);
+        zoomLabelFrameRef.current = null;
+      }
+      if (zoomSettledRef.current != null) {
+        window.clearTimeout(zoomSettledRef.current);
+        zoomSettledRef.current = null;
+      }
+    };
+  }, [opts.resetKey]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      const prev = zoomRef.current;
+      const deltaY = normalizedWheelDeltaY(event, root);
+      const factor = clamp(Math.exp(-deltaY * 0.001), 0.75, 1.333);
+      const next = clamp(prev * factor, min, max);
+      if (Math.abs(next - prev) < 0.001) return;
+      const anchor = makeViewportZoomAnchor(
+        pagesRef.current,
+        event.clientX,
+        event.clientY,
+      );
+      zoomRef.current = next;
+      const applyZoom = applyZoomRef.current ?? ((value: number) => {
+        applyVisualPageScale(pagesRef.current, value);
+      });
+      applyZoom(next);
+      if (anchor) {
+        const page = pagesRef.current[anchor.pageIndex];
+        if (page) preserveViewportZoomAnchor(root, page, anchor);
+      }
+      scheduleViewportZoomLabel(zoomLabelFrameRef, zoomLabelValueRef, setZoom, next);
+      if (zoomSettledRef.current != null) {
+        window.clearTimeout(zoomSettledRef.current);
+      }
+      zoomSettledRef.current = window.setTimeout(() => {
+        zoomSettledRef.current = null;
+        onZoomSettledRef.current?.(zoomRef.current);
+      }, 220);
+    };
+    root.addEventListener("wheel", onWheel, { passive: false });
+    return () => root.removeEventListener("wheel", onWheel);
+  }, [max, min, pagesRef, rootRef]);
+
+  return { zoom, zoomRef };
 }
 
 interface JumpProps {
@@ -605,7 +656,7 @@ function useQuoteJump(
     let marks: HTMLElement[] = [];
     let cleanup: number | null = null;
     let handle2: number | null = null;
-    // rAF to wait for layout to settle (mammoth-rendered HTML, syntax
+    // rAF to wait for layout to settle (OOXML text overlays, syntax
     // highlighting, KaTeX). Two frames is enough for prism + react-markdown.
     const handle1 = window.requestAnimationFrame(() => {
       handle2 = window.requestAnimationFrame(() => {
@@ -790,39 +841,700 @@ function LocatorBanner(
   );
 }
 
-function DocxView({ url, quote, onScrolled }: {
+type DocxDocumentInstance = import("@silurus/ooxml/docx").DocxDocument;
+type PptxViewerInstance = import("@silurus/ooxml/pptx").PptxViewer;
+type XlsxViewerInstance = import("@silurus/ooxml/xlsx").XlsxViewer;
+type OoxmlViewerInstance =
+  | PptxViewerInstance
+  | XlsxViewerInstance;
+
+interface DocxTextRunInfo {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  fontSize: number;
+  font: string;
+}
+
+const DOCX_BASE_WIDTH = 960;
+const DOCX_MIN_ZOOM = 0.45;
+const DOCX_MAX_ZOOM = 2.5;
+
+function DocxScrollView({ url, quote, onScrolled }: {
   url: string;
   quote: string | null;
   onScrolled?: () => void;
 }) {
-  const [html, setHtml] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const docRef = useRef<DocxDocumentInstance | null>(null);
+  const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const rasterZoomRef = useRef(1);
+  const [ready, setReady] = useState(false);
+  const [rendering, setRendering] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const quoteState = useQuoteJump(containerRef, html, quote, onScrolled);
+  const [pageCount, setPageCount] = useState(0);
+  const [currentPage, setCurrentPage] = useState(0);
+  const [renderRequestZoom, setRenderRequestZoom] = useState(1);
+  const [renderKey, setRenderKey] = useState(0);
+  const zoom = useViewportWheelZoom(scrollRef, pageRefs, {
+    resetKey: `docx:${url}`,
+    min: DOCX_MIN_ZOOM,
+    max: DOCX_MAX_ZOOM,
+    applyZoom: (value) => applyDocxPreviewScale(
+      pageRefs.current,
+      value / rasterZoomRef.current,
+    ),
+    onZoomSettled: setRenderRequestZoom,
+  });
+  const quoteState = useQuoteJump(
+    scrollRef,
+    ready && renderKey > 0 ? `docx:${url}:${renderKey}` : null,
+    quote,
+    onScrolled,
+  );
+
   useEffect(() => {
     let cancelled = false;
-    setHtml(null); setErr(null);
+    setReady(false);
+    setRendering(false);
+    setErr(null);
+    setPageCount(0);
+    setCurrentPage(0);
+    setRenderRequestZoom(1);
+    setRenderKey(0);
+    rasterZoomRef.current = 1;
+    pageRefs.current = [];
+    docRef.current?.destroy();
+    docRef.current = null;
+
     (async () => {
       try {
-        const buf = await (await fetch(url)).arrayBuffer();
-        const mammoth = await import("mammoth");
-        const r = await mammoth.convertToHtml({ arrayBuffer: buf });
-        if (!cancelled) setHtml(sanitizeDocxHtml(r.value));
-      } catch (e) {
-        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+        const { DocxDocument } = await import("@silurus/ooxml/docx");
+        const doc = await DocxDocument.load(url);
+        if (cancelled) {
+          doc.destroy();
+          return;
+        }
+        docRef.current = doc;
+        setPageCount(doc.pageCount);
+        setReady(true);
+      } catch (error) {
+        if (!cancelled) {
+          setErr(error instanceof Error ? error.message : String(error));
+        }
       }
     })();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+      docRef.current?.destroy();
+      docRef.current = null;
+    };
   }, [url]);
-  if (err) return <ViewerError msg={err} />;
-  if (html === null) return <ViewerLoading />;
+
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root) return;
+    let frame: number | null = null;
+    const update = () => {
+      frame = null;
+      setCurrentPage(nearestDocxPage(root, pageRefs.current));
+    };
+    const schedule = () => {
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(update);
+    };
+    update();
+    root.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    return () => {
+      root.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+      if (frame != null) window.cancelAnimationFrame(frame);
+    };
+  }, [pageCount]);
+
+  useEffect(() => {
+    if (!ready || pageCount <= 0) return;
+    const doc = docRef.current;
+    if (!doc) return;
+    let cancelled = false;
+    const handle = window.requestAnimationFrame(() => {
+      setRendering(true);
+      void (async () => {
+        const root = scrollRef.current;
+        const renderAnchor = root ? makeViewportCenterAnchor(root, pageRefs.current) : null;
+        try {
+          for (let i = 0; i < pageCount; i += 1) {
+            if (cancelled) return;
+            const pageEl = pageRefs.current[i];
+            if (!pageEl) continue;
+            await renderDocxPage(
+              pageEl,
+              doc,
+              i,
+              renderRequestZoom,
+              zoom.zoomRef.current / renderRequestZoom,
+            );
+          }
+          if (!cancelled) {
+            rasterZoomRef.current = renderRequestZoom;
+            applyDocxPreviewScale(pageRefs.current, zoom.zoomRef.current / renderRequestZoom);
+            if (root && renderAnchor) {
+              const page = pageRefs.current[renderAnchor.pageIndex];
+              if (page) preserveViewportZoomAnchor(root, page, renderAnchor);
+            }
+            setRenderKey((n) => n + 1);
+            setRendering(false);
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setErr(error instanceof Error ? error.message : String(error));
+            setRendering(false);
+          }
+        }
+      })();
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(handle);
+    };
+  }, [ready, pageCount, renderRequestZoom]);
+
+  const canPrev = ready && currentPage > 0;
+  const canNext = ready && pageCount > 0 && currentPage < pageCount - 1;
+  const label = pageCount > 0
+    ? `Page ${currentPage + 1}/${pageCount} · ${Math.round(zoom.zoom * 100)}%`
+    : `Page · ${Math.round(zoom.zoom * 100)}%`;
+
   return (
-    <div className="h-full overflow-auto px-6 py-4" ref={containerRef}>
-      {quoteState.banner}
-      <div className="prose-marginalia mx-auto max-w-3xl"
-           dangerouslySetInnerHTML={{ __html: html }} />
+    <div className="flex h-full min-h-0 flex-col bg-bg-subtle">
+      <div className="flex h-9 shrink-0 items-center justify-end gap-2 border-b border-border bg-bg px-3 text-xs text-fg-muted">
+        <button
+          type="button"
+          title="Previous page"
+          disabled={!canPrev}
+          onClick={() => scrollDocxPage(pageRefs.current, currentPage - 1)}
+          className="rounded border border-border p-1 hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ChevronUp size={14} />
+        </button>
+        <span className="min-w-36 text-center tabular-nums">{label}</span>
+        <button
+          type="button"
+          title="Next page"
+          disabled={!canNext}
+          onClick={() => scrollDocxPage(pageRefs.current, currentPage + 1)}
+          className="rounded border border-border p-1 hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ChevronDown size={14} />
+        </button>
+      </div>
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto">
+        {quoteState.banner}
+        <div className="flex min-h-full w-full flex-col items-center gap-4 p-4">
+          {Array.from({ length: pageCount }, (_, i) => (
+            <div
+              key={i}
+              ref={(el) => { pageRefs.current[i] = el; }}
+              className="flex min-h-24 justify-center"
+            />
+          ))}
+        </div>
+        {(!ready || (rendering && renderKey === 0)) && !err && (
+          <div className="absolute inset-0 z-20 bg-bg/70">
+            <ViewerLoading />
+          </div>
+        )}
+        {err && (
+          <div className="absolute inset-0 z-20 bg-bg">
+            <ViewerError msg={err} />
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+async function renderDocxPage(
+  pageEl: HTMLDivElement,
+  doc: DocxDocumentInstance,
+  pageIndex: number,
+  zoom: number,
+  previewScale: number,
+): Promise<void> {
+  const wrapper = document.createElement("div");
+  wrapper.className = "relative inline-block align-top bg-white shadow-sm";
+  const canvas = document.createElement("canvas");
+  canvas.className = "block bg-white";
+  const textLayer = document.createElement("div");
+  textLayer.style.cssText =
+    "position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;";
+  wrapper.appendChild(canvas);
+  wrapper.appendChild(textLayer);
+
+  const runs: DocxTextRunInfo[] = [];
+  const dpr = window.devicePixelRatio || 1;
+  await doc.renderPage(canvas, pageIndex, {
+    width: DOCX_BASE_WIDTH * zoom,
+    dpr,
+    onTextRun: (run: DocxTextRunInfo) => runs.push(run),
+  });
+  buildDocxTextLayer(textLayer, canvas, runs);
+  const width = parseCssPixels(canvas.style.width) || canvas.width / dpr;
+  const height = parseCssPixels(canvas.style.height) || canvas.height / dpr;
+  pageEl.dataset.docxBaseWidth = String(width);
+  pageEl.dataset.docxBaseHeight = String(height);
+  pageEl.style.overflow = "visible";
+  wrapper.style.transformOrigin = "top center";
+  wrapper.style.willChange = "transform";
+  setDocxPageScale(pageEl, wrapper, width, height, previewScale);
+  pageEl.replaceChildren(wrapper);
+}
+
+function buildDocxTextLayer(
+  textLayer: HTMLDivElement,
+  canvas: HTMLCanvasElement,
+  runs: DocxTextRunInfo[],
+) {
+  textLayer.replaceChildren();
+  textLayer.style.width = canvas.style.width || `${canvas.width}px`;
+  textLayer.style.height = canvas.style.height || `${canvas.height}px`;
+  for (const run of runs) {
+    const span = document.createElement("span");
+    span.textContent = run.text;
+    span.style.cssText =
+      `position:absolute;left:${run.x}px;top:${run.y}px;` +
+      `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
+      "white-space:pre;color:transparent;cursor:text;pointer-events:all;";
+    textLayer.appendChild(span);
+  }
+}
+
+function applyDocxPreviewScale(
+  pages: (HTMLDivElement | null)[],
+  scale: number,
+) {
+  for (const page of pages) {
+    if (!page) continue;
+    const baseWidth = Number(page.dataset.docxBaseWidth || 0);
+    const baseHeight = Number(page.dataset.docxBaseHeight || 0);
+    const wrapper = page.firstElementChild as HTMLElement | null;
+    if (!baseWidth || !baseHeight || !wrapper) continue;
+    setDocxPageScale(page, wrapper, baseWidth, baseHeight, scale);
+  }
+}
+
+function scheduleViewportZoomLabel(
+  frameRef: MutableRefObject<number | null>,
+  valueRef: MutableRefObject<number>,
+  setZoom: (value: number) => void,
+  zoom: number,
+) {
+  valueRef.current = zoom;
+  if (frameRef.current != null) return;
+  frameRef.current = window.requestAnimationFrame(() => {
+    frameRef.current = null;
+    setZoom(valueRef.current);
+  });
+}
+
+function setDocxPageScale(
+  page: HTMLDivElement,
+  wrapper: HTMLElement,
+  baseWidth: number,
+  baseHeight: number,
+  scale: number,
+) {
+  const safeScale = clamp(scale, DOCX_MIN_ZOOM / DOCX_MAX_ZOOM, DOCX_MAX_ZOOM / DOCX_MIN_ZOOM);
+  page.style.width = `${baseWidth * safeScale}px`;
+  page.style.height = `${baseHeight * safeScale}px`;
+  wrapper.style.transformOrigin = "top center";
+  wrapper.style.transform = Math.abs(safeScale - 1) < 0.001
+    ? ""
+    : `scale(${safeScale})`;
+}
+
+function refreshVisualPageBase(page: HTMLDivElement): boolean {
+  const wrapper = page.firstElementChild as HTMLElement | null;
+  if (!wrapper) return false;
+  const rect = wrapper.getBoundingClientRect();
+  const transform = wrapper.style.transform;
+  if (transform) wrapper.style.transform = "";
+  const width = wrapper.offsetWidth || rect.width;
+  const height = wrapper.offsetHeight || rect.height;
+  wrapper.style.transform = transform;
+  if (!width || !height) return false;
+  page.dataset.visualBaseWidth = String(width);
+  page.dataset.visualBaseHeight = String(height);
+  page.style.overflow = "visible";
+  wrapper.style.transformOrigin = "top center";
+  wrapper.style.willChange = "transform";
+  return true;
+}
+
+function applyVisualPageScale(
+  pages: (HTMLDivElement | null)[],
+  zoom: number,
+) {
+  const safeZoom = clamp(zoom, VIEWER_MIN_ZOOM, VIEWER_MAX_ZOOM);
+  for (const page of pages) {
+    if (!page) continue;
+    const wrapper = page.firstElementChild as HTMLElement | null;
+    if (!wrapper) continue;
+    let baseWidth = Number(page.dataset.visualBaseWidth || 0);
+    let baseHeight = Number(page.dataset.visualBaseHeight || 0);
+    if ((!baseWidth || !baseHeight) && refreshVisualPageBase(page)) {
+      baseWidth = Number(page.dataset.visualBaseWidth || 0);
+      baseHeight = Number(page.dataset.visualBaseHeight || 0);
+    }
+    if (!baseWidth || !baseHeight) continue;
+    page.style.width = `${baseWidth * safeZoom}px`;
+    page.style.height = `${baseHeight * safeZoom}px`;
+    wrapper.style.transformOrigin = "top center";
+    wrapper.style.transform = Math.abs(safeZoom - 1) < 0.001
+      ? ""
+      : `scale(${safeZoom})`;
+  }
+}
+
+function parseCssPixels(value: string): number {
+  const match = /^([\d.]+)px$/.exec(value.trim());
+  return match ? Number(match[1]) : 0;
+}
+
+function normalizedWheelDeltaY(event: WheelEvent, root: HTMLElement): number {
+  if (event.deltaMode === 1) return event.deltaY * 16;
+  if (event.deltaMode === 2) return event.deltaY * root.clientHeight;
+  return event.deltaY;
+}
+
+function makeViewportZoomAnchor(
+  pages: (HTMLDivElement | null)[],
+  clientX: number,
+  clientY: number,
+): ViewportZoomAnchor | null {
+  let bestIndex = -1;
+  let bestScore = Number.POSITIVE_INFINITY;
+  let bestRect: DOMRect | null = null;
+  for (let i = 0; i < pages.length; i += 1) {
+    const page = pages[i];
+    if (!page) continue;
+    const rect = page.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const dy = clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0;
+    const dx = clientX < rect.left ? rect.left - clientX : clientX > rect.right ? clientX - rect.right : 0;
+    const score = dy * 10 + dx;
+    if (score < bestScore) {
+      bestIndex = i;
+      bestScore = score;
+      bestRect = rect;
+    }
+  }
+  if (bestIndex < 0 || !bestRect) return null;
+  return {
+    pageIndex: bestIndex,
+    relX: clamp((clientX - bestRect.left) / bestRect.width, 0, 1),
+    relY: clamp((clientY - bestRect.top) / bestRect.height, 0, 1),
+    clientX,
+    clientY,
+  };
+}
+
+function makeViewportCenterAnchor(
+  root: HTMLDivElement,
+  pages: (HTMLDivElement | null)[],
+): ViewportZoomAnchor | null {
+  const rect = root.getBoundingClientRect();
+  return makeViewportZoomAnchor(
+    pages,
+    rect.left + rect.width / 2,
+    rect.top + rect.height / 2,
+  );
+}
+
+function preserveViewportZoomAnchor(
+  root: HTMLDivElement,
+  page: HTMLDivElement,
+  anchor: ViewportZoomAnchor,
+) {
+  const rect = page.getBoundingClientRect();
+  const nextClientX = rect.left + anchor.relX * rect.width;
+  const nextClientY = rect.top + anchor.relY * rect.height;
+  root.scrollLeft += nextClientX - anchor.clientX;
+  root.scrollTop += nextClientY - anchor.clientY;
+}
+
+function nearestDocxPage(
+  root: HTMLDivElement,
+  pages: (HTMLDivElement | null)[],
+): number {
+  const rootRect = root.getBoundingClientRect();
+  const center = rootRect.top + rootRect.height / 2;
+  let best = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < pages.length; i += 1) {
+    const page = pages[i];
+    if (!page) continue;
+    const rect = page.getBoundingClientRect();
+    const pageCenter = rect.top + rect.height / 2;
+    const distance = Math.abs(pageCenter - center);
+    if (distance < bestDistance) {
+      best = i;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function scrollDocxPage(
+  pages: (HTMLDivElement | null)[],
+  pageIndex: number,
+) {
+  const target = pages[clampInt(pageIndex, 0, Math.max(0, pages.length - 1))];
+  target?.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function OoxmlView({ url, format, quote, onScrolled }: {
+  url: string;
+  format: SingleCanvasOoxmlKind;
+  quote: string | null;
+  onScrolled?: () => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const viewerRef = useRef<OoxmlViewerInstance | null>(null);
+  const [ready, setReady] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [position, setPosition] = useState({ current: 0, total: 0 });
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [renderKey, setRenderKey] = useState(0);
+  const zoom = useViewportWheelZoom(scrollRef, pageRefs, {
+    resetKey: `${format}:${url}`,
+    applyZoom: (value) => applyVisualPageScale(pageRefs.current, value),
+  });
+  const quoteState = useQuoteJump(
+    hostRef,
+    format !== "xlsx" && ready && renderKey > 0
+      ? `${format}:${url}:${renderKey}`
+      : null,
+    quote,
+    onScrolled,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let reportedError = false;
+    const rafs: number[] = [];
+    setReady(false);
+    setErr(null);
+    setPosition({ current: 0, total: 0 });
+    setSheetNames([]);
+    setRenderKey(0);
+
+    const reportError = (error: unknown) => {
+      reportedError = true;
+      if (!cancelled) {
+        setErr(error instanceof Error ? error.message : String(error));
+      }
+    };
+    const refreshZoomGeometry = () => {
+      const page = pageRefs.current[0];
+      if (!page) return;
+      refreshVisualPageBase(page);
+      applyVisualPageScale(pageRefs.current, zoom.zoomRef.current);
+    };
+    const noteRendered = () => {
+      const handle = window.requestAnimationFrame(() => {
+        if (!cancelled) {
+          refreshZoomGeometry();
+          setRenderKey((n) => n + 1);
+        }
+      });
+      rafs.push(handle);
+    };
+
+    (async () => {
+      try {
+        const host = hostRef.current;
+        if (!host) return;
+        if (format === "pptx") {
+          const canvas = ensureOoxmlCanvas(host, canvasRef.current);
+          if (!canvas) return;
+          const { PptxViewer } = await import("@silurus/ooxml/pptx");
+          if (cancelled) return;
+          const viewer = new PptxViewer(canvas, {
+            enableTextSelection: true,
+            onError: reportError,
+            onSlideChange: (index, total) => {
+              if (cancelled) return;
+              setPosition({ current: index, total });
+              noteRendered();
+            },
+          });
+          viewerRef.current = viewer;
+          await viewer.load(url);
+        } else {
+          host.replaceChildren();
+          const { XlsxViewer } = await import("@silurus/ooxml/xlsx");
+          if (cancelled) return;
+          const viewer = new XlsxViewer(host, {
+            onError: reportError,
+            onReady: (names) => {
+              if (!cancelled) {
+                setSheetNames(names);
+                setPosition({ current: 0, total: names.length });
+                noteRendered();
+              }
+            },
+            onSheetChange: (index, total) => {
+              if (!cancelled) {
+                setPosition({ current: index, total });
+                noteRendered();
+              }
+            },
+          });
+          viewerRef.current = viewer;
+          await viewer.load(url);
+        }
+        if (!cancelled && !reportedError) setReady(true);
+      } catch (error) {
+        reportError(error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      rafs.forEach((handle) => window.cancelAnimationFrame(handle));
+      const viewer = viewerRef.current;
+      viewerRef.current = null;
+      try {
+        viewer?.destroy();
+      } catch {
+        /* Best-effort cleanup for third-party viewer teardown. */
+      }
+      const host = hostRef.current;
+      const canvas = canvasRef.current;
+      if (format === "xlsx") {
+        host?.replaceChildren();
+      } else if (host && canvas && !host.contains(canvas)) {
+        host.appendChild(canvas);
+      }
+    };
+  }, [format, url]);
+
+  const canPrev = ready && position.total > 0 && position.current > 0;
+  const canNext = ready && position.total > 0 && position.current < position.total - 1;
+  const label = `${ooxmlPositionLabel(format, position, sheetNames)} · ${Math.round(zoom.zoom * 100)}%`;
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-bg-subtle">
+      <div className="flex h-9 shrink-0 items-center justify-end gap-2 border-b border-border bg-bg px-3 text-xs text-fg-muted">
+        <button
+          type="button"
+          title="Previous"
+          disabled={!canPrev}
+          onClick={() => void ooxmlPrev(format, viewerRef.current)}
+          className="rounded border border-border p-1 hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ChevronLeft size={14} />
+        </button>
+        <span className="min-w-28 text-center tabular-nums">{label}</span>
+        <button
+          type="button"
+          title="Next"
+          disabled={!canNext}
+          onClick={() => void ooxmlNext(format, viewerRef.current)}
+          className="rounded border border-border p-1 hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ChevronRight size={14} />
+        </button>
+      </div>
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto">
+        {quoteState.banner}
+        <div className="flex min-h-full w-full justify-center p-4">
+          <div
+            ref={(el) => { pageRefs.current[0] = el; }}
+            className="inline-flex justify-center"
+          >
+            <div
+              ref={hostRef}
+              className={
+                format === "xlsx"
+                  ? "h-[640px] w-[960px] bg-white shadow-sm"
+                  : "inline-block"
+              }
+            >
+              {format !== "xlsx" && (
+                <canvas
+                  ref={canvasRef}
+                  className="block max-w-full bg-white shadow-sm"
+                  style={{ width: "min(100%, 960px)" }}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+        {!ready && !err && (
+          <div className="absolute inset-0 z-20 bg-bg/80">
+            <ViewerLoading />
+          </div>
+        )}
+        {err && (
+          <div className="absolute inset-0 z-20 bg-bg">
+            <ViewerError msg={err} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ensureOoxmlCanvas(
+  host: HTMLDivElement,
+  canvas: HTMLCanvasElement | null,
+): HTMLCanvasElement | null {
+  if (!canvas) return null;
+  if (!host.contains(canvas)) host.appendChild(canvas);
+  return canvas;
+}
+
+function ooxmlPositionLabel(
+  format: SingleCanvasOoxmlKind,
+  position: { current: number; total: number },
+  sheetNames: string[],
+): string {
+  const total = position.total;
+  if (total <= 0) {
+    return format === "pptx" ? "Slide" : "Sheet";
+  }
+  if (format === "xlsx") {
+    const name = sheetNames[position.current];
+    return name ? `${name} (${position.current + 1}/${total})` : `Sheet ${position.current + 1}/${total}`;
+  }
+  return `Slide ${position.current + 1}/${total}`;
+}
+
+async function ooxmlPrev(
+  format: SingleCanvasOoxmlKind,
+  viewer: OoxmlViewerInstance | null,
+): Promise<void> {
+  if (!viewer) return;
+  if (format === "pptx") await (viewer as PptxViewerInstance).prevSlide();
+  else await (viewer as XlsxViewerInstance).prevSheet();
+}
+
+async function ooxmlNext(
+  format: SingleCanvasOoxmlKind,
+  viewer: OoxmlViewerInstance | null,
+): Promise<void> {
+  if (!viewer) return;
+  if (format === "pptx") await (viewer as PptxViewerInstance).nextSlide();
+  else await (viewer as XlsxViewerInstance).nextSheet();
 }
 
 function BinaryView({ url, name }: { url: string; name: string }) {

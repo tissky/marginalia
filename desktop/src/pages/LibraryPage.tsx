@@ -4,7 +4,7 @@
  *    Tree (left, fixed-ish width)  | Viewer (center, fluid) | Meta (right, collapsible)
  *
  *  - Tree merges folders and files (folders expand, files leaf-select)
- *  - Viewer renders the selected file (PDF iframe / image / md / code / docx)
+ *  - Viewer renders the selected file (PDF iframe / image / md / code / OOXML)
  *  - Meta panel shows entry's display_name, lifecycle, summary, tags, related
  *  - Background ingest tasks are reflected by spinners on the matching file rows
  *    via a single 4 s poll of /v1/tasks/active
@@ -142,8 +142,8 @@ export function LibraryPage() {
   useEffect(() => {
     if (!selectedEntry) { setMeta(null); return; }
     // Reset meta immediately so stale metadata from a previous file
-    // doesn't cause wrong classification (e.g. PDF iframe loading a
-    // docx URL triggers a browser download).
+    // doesn't cause wrong classification (e.g. PDF iframe loading an
+    // OOXML URL triggers a browser download).
     setMeta(null);
     let cancelled = false;
     setMetaLoading(true);

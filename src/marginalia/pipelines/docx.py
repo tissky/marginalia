@@ -32,7 +32,9 @@ from marginalia.storage.base import StorageBackend
 
 log = logging.getLogger(__name__)
 
-MAX_DOCX_BYTES = 30 * 1024 * 1024  # 30 MB hard cap
+# Do not reject DOCX by compressed package size. Media-heavy Word files can
+# exceed tens of MB while yielding a small text index; extracted content below
+# is still bounded by paragraph and prompt budgets.
 MAX_OUTPUT_CHARS = 80_000  # plenty for the LLM prompt
 DEFAULT_MAX_CHARS = 8000
 
@@ -85,10 +87,6 @@ class DocxPipeline(Pipeline):
         filename: str | None = None,
     ) -> SegmentResult:
         """Bytes-first variant — used by ArchivePipeline for member peeks."""
-        if len(body) > MAX_DOCX_BYTES:
-            return SegmentResult(
-                error=f"docx exceeds {MAX_DOCX_BYTES // (1024*1024)}MB cap",
-            )
         try:
             paragraphs = self._parse_paragraphs_from_bytes(body)
         except Exception as exc:  # noqa: BLE001 — python-docx surfaces many
@@ -196,10 +194,6 @@ class DocxPipeline(Pipeline):
         buf = bytearray()
         async for chunk in storage.get(key):
             buf.extend(chunk)
-            if len(buf) > MAX_DOCX_BYTES:
-                raise ValueError(
-                    f"docx exceeds {MAX_DOCX_BYTES // (1024*1024)}MB cap"
-                )
         return cls._parse_paragraphs_from_bytes(bytes(buf))
 
     @staticmethod

@@ -913,7 +913,7 @@ _TEXT_SEARCHABLE_EXTS = frozenset({
     "json", "yaml", "yml", "toml", "ini", "conf", "env",
     "sql", "html", "css", "scss", "ts", "tsx", "js", "jsx",
     "py", "rb", "go", "rs", "java", "c", "h", "cpp", "hpp",
-    "sh", "bash", "zsh", "ps1", "docx",
+    "sh", "bash", "zsh", "ps1", "docx", "pptx", "pptm",
 })
 
 

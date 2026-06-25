@@ -463,7 +463,7 @@ async def _check_rewrite():
         expected_q = urllib.parse.quote_plus("def foo")
         assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
 
-        # 19. docx kind: FileViewer renders DOCX into searchable HTML.
+        # 19. docx kind: FileViewer exposes a searchable text-selection layer.
         set_file(
             mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             original_ext="docx",
@@ -473,6 +473,18 @@ async def _check_rewrite():
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="contract clause" - r',
         )
         expected_q = urllib.parse.quote_plus("contract clause")
+        assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
+
+        # 20. pptx viewer exposes a searchable text-selection layer.
+        set_file(
+            mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            original_ext="pptx",
+            kind="text",
+        )
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="slide bullet" - r',
+        )
+        expected_q = urllib.parse.quote_plus("slide bullet")
         assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
 
     print("[3] _rewrite_footnotes_for_display: type-aware dispatcher routes quote/page/bare correctly")

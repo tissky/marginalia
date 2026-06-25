@@ -85,7 +85,7 @@ class SegmentResult:
 
 
 class Pipeline(ABC):
-    """Concrete pipeline (text / pdf / image / docx / spreadsheet / log /
+    """Concrete pipeline (text / pdf / image / docx / pptx / spreadsheet / log /
     container). All pipelines must support `run` (ingest); most also
     implement `read_segment` (read back). Containers additionally
     override `list_members`.
@@ -98,6 +98,7 @@ class Pipeline(ABC):
       text-shaped          line_start / line_end, section_id, heading
       pdf                  page_start / page_end (+ generic chunking)
       docx                 paragraph_start / paragraph_end
+      pptx                 slide_start / slide_end
       container            member_path (delegates to a sub-pipeline for
                            that member)
 

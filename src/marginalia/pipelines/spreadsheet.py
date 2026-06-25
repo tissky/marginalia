@@ -30,7 +30,8 @@ from marginalia.storage.base import StorageBackend
 
 log = logging.getLogger(__name__)
 
-MAX_XLSX_BYTES = 30 * 1024 * 1024
+# Do not reject XLSX by compressed package size. Ingest is controlled by
+# sheet/row sampling below, which is a better proxy for work than media size.
 MAX_ROWS_PER_SHEET = 200
 MAX_TAIL_PEEK = 20
 MAX_CELL_CHARS = 200
@@ -78,10 +79,6 @@ class SpreadsheetPipeline(Pipeline):
         filename: str | None = None,
     ) -> SegmentResult:
         """Bytes-first variant — used by ArchivePipeline for member peeks."""
-        if len(body) > MAX_XLSX_BYTES:
-            return SegmentResult(
-                error=f"xlsx exceeds {MAX_XLSX_BYTES // (1024*1024)}MB cap",
-            )
         try:
             text = self._render_from_bytes(body)
         except Exception as exc:  # noqa: BLE001
@@ -151,10 +148,6 @@ class SpreadsheetPipeline(Pipeline):
         buf = bytearray()
         async for chunk in storage.get(key):
             buf.extend(chunk)
-            if len(buf) > MAX_XLSX_BYTES:
-                raise ValueError(
-                    f"xlsx exceeds {MAX_XLSX_BYTES // (1024*1024)}MB cap"
-                )
         text, coverage = cls._render_from_bytes_with_coverage(bytes(buf))
         coverage["total_bytes"] = len(buf)
         coverage["indexed_bytes"] = len(buf)

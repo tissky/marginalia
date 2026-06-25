@@ -13,6 +13,7 @@ Accepts a list of `requests`, each:
       { "page_start": 3, "page_end": 5 },          // PDF only
       { "page_label": "54" },                      // PDF printed label
       { "paragraph_start": 4, "paragraph_end": 12 }, // DOCX only
+      { "slide_start": 2, "slide_end": 4 },          // PPTX only
       { "pattern": "leader.*election", "context_lines": 3, "max_matches": 10 },
       { "member_path": "papers/raft.pdf", "page_start": 4 }   // container
     ]
@@ -118,6 +119,21 @@ SCHEMA: dict[str, Any] = {
                                 # DOCX
                                 "paragraph_start": {"type": "integer", "minimum": 1},
                                 "paragraph_end": {"type": "integer", "minimum": 1},
+                                # PPTX
+                                "slide_start": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": (
+                                        "PPTX only: first 1-indexed slide to read."
+                                    ),
+                                },
+                                "slide_end": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": (
+                                        "PPTX only: last 1-indexed slide to read."
+                                    ),
+                                },
                                 # pattern search
                                 "pattern": {"type": "string"},
                                 "patterns": {
@@ -184,12 +200,14 @@ SCHEMA: dict[str, Any] = {
         "one or more `reads`, each addressing a slice via fields the "
         "pipeline understands (offset/max_chars for any file; "
         "page_start/page_end or page_label for PDF; "
+        "slide_start/slide_end for PPTX; "
         "line_start/line_end / section_id / "
         "heading for text; pattern or patterns for regex search; member_path for "
         "container members). `pattern` can be combined with a range "
         "(page_start/end, line_start/end, paragraph_start/end, or "
         "spreadsheet heading) to restrict the search to that window — "
         "useful for a long file where the same term appears many times. "
+        "PPTX `pattern` can be combined with slide_start/slide_end. "
         "Pattern hits are paginated via `match_offset` (use the "
         "`next_match_offset` from a previous response). Pass `question` "
         "for image entries. For OCR-indexed PDFs, omit it to read "

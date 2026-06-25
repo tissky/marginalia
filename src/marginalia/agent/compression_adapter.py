@@ -44,7 +44,7 @@ _LOG_SIGNAL_RE = re.compile(
 _JSON_EXTS = {".json", ".jsonl", ".ndjson"}
 _TABLE_EXTS = {".csv", ".tsv", ".tab"}
 _LOG_EXTS = {".log", ".out", ".err"}
-_EXTRACTED_TEXT_EXTS = {".docx", ".pdf"}
+_EXTRACTED_TEXT_EXTS = {".docx", ".pdf", ".pptx", ".pptm"}
 _CODE_EXTS = {
     ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
     ".go", ".rs", ".java", ".c", ".cc", ".cpp", ".h", ".hpp",

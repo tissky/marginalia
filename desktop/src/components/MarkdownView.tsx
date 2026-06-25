@@ -34,7 +34,7 @@ import { useI18n } from "@/lib/i18n";
 
 /** Deep-link position on top of an `entry:<uuid>` citation. runtime.py
  *  rewrites the agent's footnote definitions into one of three URL shapes:
- *    text / md / docx:   ?q=<urlencoded verbatim excerpt>
+ *    text / md / OOXML:  ?q=<urlencoded verbatim excerpt>
  *    PDF:                ?page=<n>
  *    legacy / manual:    ?line=<start>-<end>  (still tolerated)
  *  The receiving handler maps these onto FileViewer's matching jump modes. */
