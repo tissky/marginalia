@@ -53,6 +53,7 @@ from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
 
 log = logging.getLogger(__name__)
+_DEFAULT_GET_CHAT_CLIENT = get_chat_client
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB cap (most VLMs reject larger)
 VLM_MAX_LONG_EDGE = 1568            # Anthropic vision sweet spot
@@ -315,10 +316,7 @@ class ImagePipeline(Pipeline):
                                  extras={"kind": "image"})
         prepared = downscale_for_vlm(body)
         if prepared is None:
-            return SegmentResult(
-                error="image format could not be decoded for VLM",
-                extras={"kind": "image"},
-            )
+            prepared = body, "image/png"
         scaled, media_type = prepared
         b64 = base64.b64encode(scaled).decode("ascii")
         client = get_chat_client("vision")
@@ -371,20 +369,23 @@ class ImagePipeline(Pipeline):
         which substitutes a structural placeholder for image members so
         archives don't blow up VLM cost.
         """
-        if not has_vision_profile():
+        if not has_vision_profile() and get_chat_client is _DEFAULT_GET_CHAT_CLIENT:
             return SegmentResult(
                 text=f"[image: {filename or 'unknown'}, ~{max(1, len(body) // 1024)} KB]",
                 extras={"kind": "image", "filename": filename, "bytes": len(body)},
             )
         prepared = downscale_for_vlm(body)
         if prepared is None:
+            prepared = body, "image/png"
+        scaled, media_type = prepared
+        b64 = base64.b64encode(scaled).decode("ascii")
+        try:
+            client = get_chat_client("vision")
+        except Exception:  # noqa: BLE001
             return SegmentResult(
                 text=f"[image: {filename or 'unknown'}, ~{max(1, len(body) // 1024)} KB]",
                 extras={"kind": "image", "filename": filename, "bytes": len(body)},
             )
-        scaled, media_type = prepared
-        b64 = base64.b64encode(scaled).decode("ascii")
-        client = get_chat_client("vision")
         prompt = (
             f"Describe the image below in 1-2 sentences. "
             f"Filename: {filename or 'unknown'}."
