@@ -54,6 +54,15 @@ from marginalia.storage import get_storage
 
 MAX_EFFECTIVE_READS_PER_ENTRY = 50
 
+_LOCATOR_VALUE_KEYS = {
+    "heading",
+    "pattern",
+    "member_path",
+    "section_id",
+    "page_label",
+    "question",
+}
+
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -392,6 +401,97 @@ def _expand_reads(reads_args: list[Any]) -> list[dict[str, Any]]:
             item["pattern"] = pattern
             expanded.append(item)
     return expanded
+
+
+def _locator_diagnostic(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Return read locator shape without logging user/file content values."""
+    diag: dict[str, Any] = {}
+    numeric_keys = (
+        "offset",
+        "max_chars",
+        "line_start",
+        "line_end",
+        "page_start",
+        "page_end",
+        "paragraph_start",
+        "paragraph_end",
+        "slide_start",
+        "slide_end",
+        "context_lines",
+        "max_matches",
+        "match_offset",
+    )
+    for key in numeric_keys:
+        value = args.get(key)
+        if isinstance(value, int):
+            diag[key] = value
+    for key in _LOCATOR_VALUE_KEYS:
+        if args.get(key):
+            diag[f"has_{key}"] = True
+    patterns = args.get("patterns")
+    if isinstance(patterns, list):
+        diag["patterns_count"] = len(patterns)
+    return diag
+
+
+def _segment_diagnostic(extras: Mapping[str, Any]) -> dict[str, Any]:
+    """Return segment metadata shape without copying content-bearing values."""
+    diag: dict[str, Any] = {}
+    scalar_keys = (
+        "offset",
+        "char_count",
+        "total_chars",
+        "line_start",
+        "line_end",
+        "page_start",
+        "page_end",
+        "total_pages",
+        "paragraph_start",
+        "paragraph_end",
+        "total_paragraphs",
+        "slide_start",
+        "slide_end",
+        "total_slides",
+        "match_count",
+        "total_matches",
+        "match_offset",
+        "next_match_offset",
+        "next_offset",
+    )
+    for key in scalar_keys:
+        if key not in extras:
+            continue
+        value = extras.get(key)
+        if isinstance(value, (bool, int, float, str)) or value is None:
+            diag[key] = value
+    for key in ("truncated", "has_more", "read_truncated", "source_truncated"):
+        value = extras.get(key)
+        if isinstance(value, bool):
+            diag[key] = value
+    count_keys = {
+        "available_sheets": "available_sheets_count",
+        "available": "available_members_count",
+    }
+    for key, out_key in count_keys.items():
+        value = extras.get(key)
+        if isinstance(value, list):
+            diag[out_key] = len(value)
+    return diag
+
+
+def _error_diagnostic(error: str) -> str:
+    lowered = error.casefold()
+    if "not found" in lowered:
+        return "not found"
+    if "invalid regex" in lowered:
+        return "invalid regex"
+    if "integer" in lowered or "must be" in lowered:
+        return "invalid locator"
+    if "unsupported" in lowered or "does not support" in lowered:
+        return "unsupported"
+    if "empty result" in lowered or "no matches" in lowered:
+        return "empty"
+    return "error"
 
 
 async def _safe_read_segment(

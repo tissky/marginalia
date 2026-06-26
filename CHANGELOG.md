@@ -6,6 +6,13 @@
 
 ### Fixed
 
+- `read_files` deep reads now reopen original files or complete extracted
+  text instead of ingest/index previews, with consistent heading, page, line,
+  pattern, and offset behavior across EPUB, PDF, Office, email, and archive
+  members.
+- Desktop file viewers are split by format (PDF, Office, EPUB, email, image,
+  archive) while keeping the Library toolbar entry point stable, reducing
+  regressions between unrelated preview types.
 - Desktop Office previews now allow the `@silurus/ooxml` WebAssembly and
   worker sources required by the Tauri/WebView2 runtime, avoiding a stuck
   loading state for DOCX/PPTX/XLSX files.

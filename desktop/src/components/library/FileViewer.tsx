@@ -5,6 +5,7 @@ import { fileEntries } from "@/api/client";
 import type { FileMetadata } from "@/types/api";
 import { useI18n } from "@/lib/i18n";
 import {
+  ArchiveView,
   BinaryView,
   CodeView,
   EpubView,
@@ -28,7 +29,7 @@ interface Props {
   onLocatorConsumed?: () => void;
 }
 
-type Kind = "pdf" | "image" | "md" | "text" | "code" | "docx" | "xlsx" | "pptx" | "epub" | "email" | "binary";
+type Kind = "pdf" | "image" | "md" | "text" | "code" | "docx" | "xlsx" | "pptx" | "epub" | "email" | "archive" | "binary";
 type OfficeKind = "docx" | "xlsx" | "pptx";
 
 const TEXT_EXT = new Set([
@@ -43,8 +44,12 @@ const CODE_EXT_TO_LANG: Record<string, string> = {
   sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell",
   md: "markdown",
 };
+const ARCHIVE_EXT = new Set([
+  "zip", "tar", "tgz", "gz", "bz2", "xz", "lzma", "7z", "rar", "iso", "cab",
+]);
 
 function classifyByName(name: string): Kind {
+  const lower = name.toLowerCase();
   const ext = (name.split(".").pop() || "").toLowerCase();
   if (ext === "pdf") return "pdf";
   if (["avif", "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "heic", "heif"].includes(ext)) return "image";
@@ -54,6 +59,10 @@ function classifyByName(name: string): Kind {
   if (ext === "pptx" || ext === "pptm") return "pptx";
   if (ext === "epub") return "epub";
   if (ext === "eml" || ext === "msg") return "email";
+  if (
+    ARCHIVE_EXT.has(ext)
+    || [".tar.gz", ".tar.bz2", ".tar.xz"].some((suffix) => lower.endsWith(suffix))
+  ) return "archive";
   if (CODE_EXT_TO_LANG[ext]) return "code";
   if (TEXT_EXT.has(ext)) return "text";
   return "binary";
@@ -157,6 +166,7 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
             onScrolled={onLocatorConsumed}
           />
         )}
+        {kind === "archive" && <ArchiveView url={downloadUrl} name={name} />}
         {kind === "binary" && <BinaryView url={downloadUrl} name={name} />}
       </div>
     </div>

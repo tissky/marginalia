@@ -624,27 +624,28 @@ class TextPipeline(Pipeline):
         heading = (args.get("heading") or "").strip()
         if section_id or heading:
             sections = _sections_from_file(file_row) if file_row else None
-            if sections is None:
-                return SegmentResult(
-                    error="section_id/heading lookup needs persisted description",
-                )
-            target = _find_section(sections, section_id=section_id, heading=heading)
-            if target is not None:
-                text, extras = _section_body(target, body)
-                return _clamp(text, offset, max_chars, extras=extras)
+            if sections is not None:
+                target = _find_section(sections, section_id=section_id, heading=heading)
+                if target is not None:
+                    text, extras = _section_body(target, body)
+                    return _clamp(text, offset, max_chars, extras=extras)
             if heading:
                 scanned = _heading_scan_body(body, heading)
                 if scanned is not None:
                     text, extras = scanned
                     return _clamp(text, offset, max_chars, extras=extras)
+            if section_id and sections is None:
+                return SegmentResult(
+                    error="section_id lookup needs persisted description",
+                )
             miss = section_id or f"heading={heading!r}"
             return SegmentResult(error=f"section not found: {miss}")
 
         line_start = args.get("line_start")
         line_end = args.get("line_end")
-        if line_start:
+        if line_start or line_end:
             try:
-                ls = max(1, int(line_start))
+                ls = max(1, int(line_start)) if line_start else 1
             except (TypeError, ValueError):
                 return SegmentResult(error="line_start must be an integer")
             try:

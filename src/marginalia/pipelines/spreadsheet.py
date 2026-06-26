@@ -68,7 +68,7 @@ class SpreadsheetPipeline(Pipeline):
         args: dict[str, Any],
         storage: StorageBackend,
     ) -> SegmentResult:
-        body = await self._extract_text(storage, file_row.storage_key)
+        body = await self._extract_read_text(storage, file_row.storage_key)
         return self._slice(body, args)
 
     async def read_segment_from_bytes(
@@ -80,7 +80,7 @@ class SpreadsheetPipeline(Pipeline):
     ) -> SegmentResult:
         """Bytes-first variant — used by ArchivePipeline for member peeks."""
         try:
-            text = self._render_from_bytes(body)
+            text = self._render_read_from_bytes(body)
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"xlsx parse failed: {exc}")
         return self._slice(text, args)
@@ -142,6 +142,13 @@ class SpreadsheetPipeline(Pipeline):
         return body
 
     @classmethod
+    async def _extract_read_text(cls, storage: StorageBackend, key: str) -> str:
+        buf = bytearray()
+        async for chunk in storage.get(key):
+            buf.extend(chunk)
+        return cls._render_read_from_bytes(bytes(buf))
+
+    @classmethod
     async def _extract_text_with_coverage(
         cls, storage: StorageBackend, key: str,
     ) -> tuple[str, dict[str, Any]]:
@@ -159,8 +166,18 @@ class SpreadsheetPipeline(Pipeline):
         return text
 
     @staticmethod
+    def _render_read_from_bytes(body: bytes) -> str:
+        text, _coverage = SpreadsheetPipeline._render_from_bytes_with_coverage(
+            body,
+            read_full=True,
+        )
+        return text
+
+    @staticmethod
     def _render_from_bytes_with_coverage(
         body: bytes,
+        *,
+        read_full: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         try:
             import openpyxl  # type: ignore
@@ -175,12 +192,12 @@ class SpreadsheetPipeline(Pipeline):
             read_only=True,
         )
         try:
-            return _render_workbook(wb)
+            return _render_workbook(wb, read_full=read_full)
         finally:
             wb.close()
 
 
-def _render_workbook(wb: Any) -> tuple[str, dict[str, Any]]:
+def _render_workbook(wb: Any, *, read_full: bool = False) -> tuple[str, dict[str, Any]]:
     parts: list[str] = []
     sheets: list[dict[str, Any]] = []
     total_rows_all = 0
@@ -189,10 +206,15 @@ def _render_workbook(wb: Any) -> tuple[str, dict[str, Any]]:
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         parts.append(f"# Sheet: {sheet_name}")
-        rows = list(_iter_rows(ws, MAX_ROWS_PER_SHEET + MAX_TAIL_PEEK))
+        rows = list(
+            _iter_rows(
+                ws,
+                None if read_full else MAX_ROWS_PER_SHEET + MAX_TAIL_PEEK,
+            )
+        )
         total_rows_estimate = max(int(getattr(ws, "max_row", 0) or 0), len(rows))
-        indexed_rows = min(len(rows), MAX_ROWS_PER_SHEET)
-        sheet_partial = (
+        indexed_rows = len(rows) if read_full else min(len(rows), MAX_ROWS_PER_SHEET)
+        sheet_partial = False if read_full else (
             len(rows) > MAX_ROWS_PER_SHEET
             or total_rows_estimate > MAX_ROWS_PER_SHEET
         )
@@ -208,9 +230,12 @@ def _render_workbook(wb: Any) -> tuple[str, dict[str, Any]]:
         if not rows:
             parts.append("(empty sheet)")
             continue
-        if len(rows) <= MAX_ROWS_PER_SHEET:
+        if read_full or len(rows) <= MAX_ROWS_PER_SHEET:
             for r in rows:
-                parts.append(_format_row(r))
+                parts.append(_format_row(
+                    r,
+                    max_cell_chars=None if read_full else MAX_CELL_CHARS,
+                ))
         else:
             for r in rows[:MAX_ROWS_PER_SHEET]:
                 parts.append(_format_row(r))
@@ -221,42 +246,43 @@ def _render_workbook(wb: Any) -> tuple[str, dict[str, Any]]:
         parts.append("")
     coverage = {
         "unit": "rows",
-        "source_mode": "spreadsheet_row_sample",
+        "source_mode": "spreadsheet_full_text" if read_full else "spreadsheet_row_sample",
         "total_units": total_rows_all,
         "indexed_units": indexed_rows_all,
         "total_rows": total_rows_all,
         "indexed_rows": indexed_rows_all,
         "indexed_partial": any_partial,
         "partial_reasons": ["sheet_row_cap"] if any_partial else [],
-        "max_rows_per_sheet": MAX_ROWS_PER_SHEET,
         "sheet_count": len(sheets),
         "sheets": sheets[:50],
         "chunked": False,
         "chunk_count": 1,
         "text_truncated": any_partial,
     }
+    if not read_full:
+        coverage["max_rows_per_sheet"] = MAX_ROWS_PER_SHEET
     return "\n".join(parts).strip(), coverage
 
 
-def _iter_rows(ws: Any, hard_limit: int):
+def _iter_rows(ws: Any, hard_limit: int | None):
     count = 0
     for row in ws.iter_rows(values_only=True):
         if any(c is not None for c in row):
             yield row
             count += 1
-            if count >= hard_limit:
+            if hard_limit is not None and count >= hard_limit:
                 return
 
 
-def _format_row(row: tuple) -> str:
+def _format_row(row: tuple, *, max_cell_chars: int | None = MAX_CELL_CHARS) -> str:
     cells: list[str] = []
     for c in row:
         if c is None:
             cells.append("")
             continue
         s = str(c)
-        if len(s) > MAX_CELL_CHARS:
-            s = s[:MAX_CELL_CHARS] + "…"
+        if max_cell_chars is not None and len(s) > max_cell_chars:
+            s = s[:max_cell_chars] + "..."
         cells.append(s.replace("|", r"\|").replace("\n", " "))
     return " | ".join(cells)
 

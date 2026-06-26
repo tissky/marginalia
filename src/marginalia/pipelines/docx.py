@@ -77,7 +77,7 @@ class DocxPipeline(Pipeline):
         storage: StorageBackend,
     ) -> SegmentResult:
         paragraphs = await self._extract_paragraphs(storage, file_row.storage_key)
-        return self._slice(paragraphs, args)
+        return self._slice(paragraphs, args, file_row=file_row)
 
     async def read_segment_from_bytes(
         self,
@@ -91,10 +91,14 @@ class DocxPipeline(Pipeline):
             paragraphs = self._parse_paragraphs_from_bytes(body)
         except Exception as exc:  # noqa: BLE001 — python-docx surfaces many
             return SegmentResult(error=f"docx parse failed: {exc}")
-        return self._slice(paragraphs, args)
+        return self._slice(paragraphs, args, file_row=None)
 
     def _slice(
-        self, paragraphs: list[str], args: dict[str, Any],
+        self,
+        paragraphs: list[str],
+        args: dict[str, Any],
+        *,
+        file_row: Any | None,
     ) -> SegmentResult:
         """Resolve args against this docx body.
 
@@ -137,6 +141,11 @@ class DocxPipeline(Pipeline):
                 paragraph_offset=paragraph_offset,
                 total_paragraphs_full=len(paragraphs),
             )
+
+        if any(args.get(key) for key in ("section_id", "heading", "line_start", "line_end")):
+            from marginalia.pipelines.text import TextPipeline
+
+            return TextPipeline()._slice(body=body, args=args, file_row=file_row)
 
         para_start = args.get("paragraph_start")
         para_end = args.get("paragraph_end")

@@ -85,7 +85,7 @@ class PptxPipeline(Pipeline):
         slides, _coverage = await self._extract_slides_with_coverage(
             storage, file_row.storage_key,
         )
-        return self._slice(slides, args)
+        return self._slice(slides, args, file_row=file_row)
 
     async def read_segment_from_bytes(
         self,
@@ -99,12 +99,14 @@ class PptxPipeline(Pipeline):
             slides, _coverage = self._render_from_bytes_with_coverage(body)
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"pptx parse failed: {exc}")
-        return self._slice(slides, args)
+        return self._slice(slides, args, file_row=None)
 
     def _slice(
         self,
         slides: list[str],
         args: dict[str, Any],
+        *,
+        file_row: Any | None,
     ) -> SegmentResult:
         body = "\n\n".join(slides)
         total_slides = len(slides)
@@ -149,6 +151,11 @@ class PptxPipeline(Pipeline):
                     "total_slides": total_slides,
                 },
             )
+
+        if any(args.get(key) for key in ("section_id", "heading", "line_start", "line_end")):
+            from marginalia.pipelines.text import TextPipeline
+
+            return TextPipeline()._slice(body=body, args=args, file_row=file_row)
 
         slide_start = body[:offset].count("\n# Slide ") + 1
         chunk = body[offset: offset + max_chars]
