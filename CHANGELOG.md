@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.2.10 - 2026-06-26
+
+### Fixed
+
+- Desktop Office previews now allow the `@silurus/ooxml` WebAssembly and
+  worker sources required by the Tauri/WebView2 runtime, avoiding a stuck
+  loading state for DOCX/PPTX/XLSX files.
+- Office previews now surface a timeout error if the embedded viewer never
+  finishes initializing.
+- Added regression coverage for continuing a loaded historical session with
+  prior turns replayed into the execute phase.
+
 ## 0.2.9 - 2026-06-25
 
 ### Fixed

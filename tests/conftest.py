@@ -72,7 +72,7 @@ _EXTERNAL_TESTS_ROOT = (
     if os.environ.get("MARGINALIA_TEST_TMP")
     else None
 )
-_RETRY_DELAYS_SECONDS = (0.05, 0.15, 0.35)
+_RETRY_DELAYS_SECONDS = (0.05, 0.15, 0.35, 1.0, 2.0)
 _ORIGINAL_RMTREE = shutil.rmtree
 
 

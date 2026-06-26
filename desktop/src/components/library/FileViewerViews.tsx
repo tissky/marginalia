@@ -24,6 +24,11 @@ import { useI18n } from "@/lib/i18n";
 
 type OfficeKind = "docx" | "xlsx" | "pptx";
 type SingleCanvasOoxmlKind = Exclude<OfficeKind, "docx">;
+const OFFICE_VIEWER_LOAD_TIMEOUT_MS = 30_000;
+
+function officePreviewTimeoutMessage(format: OfficeKind): string {
+  return `${format.toUpperCase()} preview did not finish loading. The desktop runtime may be blocking document viewer workers or WebAssembly.`;
+}
 
 export function PdfView({ url, page }: { url: string; page: number | null }) {
   // The PDF Open Parameters spec lets us append `#page=N` to scroll the
@@ -1356,6 +1361,9 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
 
   useEffect(() => {
     let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      if (!cancelled) setErr(officePreviewTimeoutMessage("docx"));
+    }, OFFICE_VIEWER_LOAD_TIMEOUT_MS);
     setReady(false);
     setRendering(false);
     setErr(null);
@@ -1380,15 +1388,18 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
         docRef.current = doc;
         setPageCount(doc.pageCount);
         setReady(true);
+        window.clearTimeout(timeout);
       } catch (error) {
         if (!cancelled) {
           setErr(error instanceof Error ? error.message : String(error));
         }
+        window.clearTimeout(timeout);
       }
     })();
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeout);
       docRef.current?.destroy();
       docRef.current = null;
     };
@@ -2007,6 +2018,10 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
   useEffect(() => {
     let cancelled = false;
     let reportedError = false;
+    const timeout = window.setTimeout(() => {
+      reportedError = true;
+      if (!cancelled) setErr(officePreviewTimeoutMessage(format));
+    }, OFFICE_VIEWER_LOAD_TIMEOUT_MS);
     const rafs: number[] = [];
     setReady(false);
     setErr(null);
@@ -2021,6 +2036,7 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
 
     const reportError = (error: unknown) => {
       reportedError = true;
+      window.clearTimeout(timeout);
       if (!cancelled) {
         setErr(error instanceof Error ? error.message : String(error));
       }
@@ -2096,7 +2112,10 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
           await viewer.load(url);
           viewer.setScale(zoom.zoomRef.current);
         }
-        if (!cancelled && !reportedError) setReady(true);
+        if (!cancelled && !reportedError) {
+          window.clearTimeout(timeout);
+          setReady(true);
+        }
       } catch (error) {
         reportError(error);
       }
@@ -2104,6 +2123,7 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeout);
       rafs.forEach((handle) => window.cancelAnimationFrame(handle));
       const viewer = viewerRef.current;
       viewerRef.current = null;
